@@ -1,11 +1,13 @@
 package ax
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,23 +28,10 @@ func newProposeCmd() *cobra.Command {
 				return err
 			}
 
-			id := proposalID(args[0], time.Now())
-			proposalDir := filepath.Join(wd, ".ax", "proposals", id)
-			if err := os.MkdirAll(filepath.Join(proposalDir, "specs"), 0o755); err != nil {
+			id, err := createProposal(wd, args[0], time.Now())
+			if err != nil {
 				return err
 			}
-
-			proposalBody := fmt.Sprintf("# Proposal\n\n- id: %s\n- title: %s\n- created_at: %s\n", id, args[0], time.Now().Format(time.RFC3339))
-			if err := os.WriteFile(filepath.Join(proposalDir, "proposal.md"), []byte(proposalBody), 0o644); err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(proposalDir, "design.md"), []byte("# Design\n\nTBD\n"), 0o644); err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(proposalDir, "tasks.md"), []byte("# Tasks\n\n- [ ] Define tasks\n"), 0o644); err != nil {
-				return err
-			}
-
 			fmt.Fprintf(cmd.OutOrStdout(), "propose: created %s\n", id)
 			return nil
 		},
@@ -64,9 +53,8 @@ func newPlanCmd() *cobra.Command {
 				return err
 			}
 
-			planFile := filepath.Join(wd, ".ax", "plans", sanitizeToken(from)+"-plan.md")
-			content := fmt.Sprintf("# Plan\n\n- from: %s\n- created_at: %s\n\n## Steps\n1. TBD\n", from, time.Now().Format(time.RFC3339))
-			if err := os.WriteFile(planFile, []byte(content), 0o644); err != nil {
+			planFile, err := createPlan(wd, from, time.Now())
+			if err != nil {
 				return err
 			}
 
@@ -85,7 +73,19 @@ func newRunCmd() *cobra.Command {
 		Use:   "run",
 		Short: "Run tasks from plan",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(cmd.OutOrStdout(), "run: plan=%s\n", plan)
+			wd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			if err := ensureMVPLayout(wd); err != nil {
+				return err
+			}
+
+			runFile, taskCount, err := runPlan(wd, plan, time.Now())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "run: created %s (tasks=%d)\n", filepath.Base(runFile), taskCount)
 			return nil
 		},
 	}
@@ -167,7 +167,18 @@ func newDiscoverCmd() *cobra.Command {
 		Short: "Discover context for a topic",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(cmd.OutOrStdout(), "discover: %s\n", args[0])
+			wd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			if err := ensureMVPLayout(wd); err != nil {
+				return err
+			}
+			report, matches, err := discoverTopic(wd, args[0], time.Now())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "discover: created %s (matches=%d)\n", filepath.Base(report), matches)
 			return nil
 		},
 	}
@@ -180,7 +191,29 @@ func newQuickCmd() *cobra.Command {
 		Short: "Run quick task flow",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(cmd.OutOrStdout(), "quick: %s\n", args[0])
+			wd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			if err := ensureMVPLayout(wd); err != nil {
+				return err
+			}
+
+			now := time.Now()
+			proposalID, err := createProposal(wd, args[0], now)
+			if err != nil {
+				return err
+			}
+			planFile, err := createPlan(wd, proposalID, now)
+			if err != nil {
+				return err
+			}
+			runFile, taskCount, err := runPlan(wd, planFile, now)
+			if err != nil {
+				return err
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "quick: proposal=%s plan=%s run=%s tasks=%d\n", proposalID, filepath.Base(planFile), filepath.Base(runFile), taskCount)
 			return nil
 		},
 	}
@@ -213,6 +246,8 @@ func ensureMVPLayout(base string) error {
 		filepath.Join(base, ".ax", "plans"),
 		filepath.Join(base, ".ax", "archive"),
 		filepath.Join(base, ".ax", "memory"),
+		filepath.Join(base, ".ax", "runs"),
+		filepath.Join(base, ".ax", "discovery"),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -266,6 +301,152 @@ func ensureMVPLayout(base string) error {
 	return nil
 }
 
+func createProposal(base, title string, now time.Time) (string, error) {
+	id := proposalID(title, now)
+	proposalDir := filepath.Join(base, ".ax", "proposals", id)
+	if err := os.MkdirAll(filepath.Join(proposalDir, "specs"), 0o755); err != nil {
+		return "", err
+	}
+
+	proposalBody := fmt.Sprintf("# Proposal\n\n- id: %s\n- title: %s\n- created_at: %s\n", id, title, now.Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(proposalDir, "proposal.md"), []byte(proposalBody), 0o644); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(proposalDir, "design.md"), []byte("# Design\n\nTBD\n"), 0o644); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(proposalDir, "tasks.md"), []byte("# Tasks\n\n- [ ] Define tasks\n"), 0o644); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func createPlan(base, from string, now time.Time) (string, error) {
+	if from == "" {
+		return "", errors.New("from is required")
+	}
+	planFile := filepath.Join(base, ".ax", "plans", sanitizeToken(from)+"-plan.md")
+	content := fmt.Sprintf("# Plan\n\n- from: %s\n- created_at: %s\n\n## Tasks\n- [ ] Review proposal context\n- [ ] Implement core changes\n- [ ] Validate with tests and build\n", from, now.Format(time.RFC3339))
+	if err := os.WriteFile(planFile, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+	return planFile, nil
+}
+
+func runPlan(base, plan string, now time.Time) (string, int, error) {
+	planPath, planID, err := resolvePlan(base, plan)
+	if err != nil {
+		return "", 0, err
+	}
+	body, err := os.ReadFile(planPath)
+	if err != nil {
+		return "", 0, err
+	}
+
+	taskCount := countUncheckedTasks(string(body))
+	runName := fmt.Sprintf("%s-run-%s.md", sanitizeToken(planID), now.Format("20060102-150405"))
+	runPath := filepath.Join(base, ".ax", "runs", runName)
+	report := fmt.Sprintf("# Run Report\n\n- plan: %s\n- executed_at: %s\n- detected_tasks: %d\n- status: completed\n", planID, now.Format(time.RFC3339), taskCount)
+	if err := os.WriteFile(runPath, []byte(report), 0o644); err != nil {
+		return "", 0, err
+	}
+	return runPath, taskCount, nil
+}
+
+func discoverTopic(base, topic string, now time.Time) (string, int, error) {
+	needle := strings.ToLower(strings.TrimSpace(topic))
+	if needle == "" {
+		return "", 0, errors.New("topic is required")
+	}
+
+	var matches []string
+	err := filepath.WalkDir(base, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(base, path)
+		if relErr != nil {
+			return relErr
+		}
+		if strings.HasPrefix(rel, ".git") || strings.HasPrefix(rel, ".ax") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if len(matches) >= 20 {
+			return nil
+		}
+
+		relLower := strings.ToLower(rel)
+		if strings.Contains(relLower, needle) {
+			matches = append(matches, fmt.Sprintf("- file: %s", rel))
+		}
+
+		f, openErr := os.Open(path)
+		if openErr != nil {
+			return nil
+		}
+		defer f.Close()
+
+		sc := bufio.NewScanner(f)
+		lineNo := 0
+		for sc.Scan() {
+			lineNo++
+			line := sc.Text()
+			if strings.Contains(strings.ToLower(line), needle) {
+				matches = append(matches, fmt.Sprintf("- %s:%d %s", rel, lineNo, truncateLine(line, 120)))
+				break
+			}
+			if lineNo >= 400 {
+				break
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", 0, err
+	}
+
+	sort.Strings(matches)
+	reportName := fmt.Sprintf("%s-%s.md", sanitizeToken(topic), now.Format("20060102-150405"))
+	reportPath := filepath.Join(base, ".ax", "discovery", reportName)
+
+	body := "# Discovery Report\n\n"
+	body += fmt.Sprintf("- topic: %s\n- generated_at: %s\n- matches: %d\n\n", topic, now.Format(time.RFC3339), len(matches))
+	if len(matches) == 0 {
+		body += "No matches found.\n"
+	} else {
+		body += "## Findings\n"
+		for _, m := range matches {
+			body += m + "\n"
+		}
+	}
+
+	if err := os.WriteFile(reportPath, []byte(body), 0o644); err != nil {
+		return "", 0, err
+	}
+	return reportPath, len(matches), nil
+}
+
+func countUncheckedTasks(plan string) int {
+	re := regexp.MustCompile(`(?m)^- \[ \] `)
+	return len(re.FindAllString(plan, -1))
+}
+
+func truncateLine(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
+}
+
 func proposalID(title string, now time.Time) string {
 	ts := now.Format("20060102-150405")
 	return ts + "-" + sanitizeToken(title)
@@ -288,6 +469,23 @@ func resolveProposal(base, proposal string) (dir string, id string, err error) {
 		return "", "", err
 	}
 	return dir, proposal, nil
+}
+
+func resolvePlan(base, plan string) (path string, id string, err error) {
+	if plan == "" {
+		return "", "", errors.New("plan is required")
+	}
+	if filepath.IsAbs(plan) || strings.Contains(plan, string(os.PathSeparator)) {
+		if _, err := os.Stat(plan); err != nil {
+			return "", "", err
+		}
+		return plan, strings.TrimSuffix(filepath.Base(plan), filepath.Ext(plan)), nil
+	}
+	path = filepath.Join(base, ".ax", "plans", plan)
+	if _, err := os.Stat(path); err != nil {
+		return "", "", err
+	}
+	return path, strings.TrimSuffix(plan, filepath.Ext(plan)), nil
 }
 
 var tokenSanitizer = regexp.MustCompile(`[^a-z0-9]+`)

@@ -41,10 +41,8 @@ type Turn struct {
 }
 
 // AppServerAdapter defines the boundary for Codex app-server integration.
-// Real transport implementation is deferred to next phase.
 type AppServerAdapter interface {
 	CreateThread(ctx context.Context, title string) (*Thread, error)
-	AppendTurn(ctx context.Context, threadID string, turn Turn) (*Turn, error)
 	RunTurn(ctx context.Context, threadID, prompt string) (*Turn, error)
 	GetThread(ctx context.Context, threadID string) (*Thread, error)
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -86,6 +87,8 @@ func TestStateInitializesLayout(t *testing.T) {
 	mustExist(t, filepath.Join(tmp, ".ax", "proposals"))
 	mustExist(t, filepath.Join(tmp, ".ax", "plans"))
 	mustExist(t, filepath.Join(tmp, ".ax", "archive"))
+	mustExist(t, filepath.Join(tmp, ".ax", "runs"))
+	mustExist(t, filepath.Join(tmp, ".ax", "discovery"))
 	mustExist(t, filepath.Join(tmp, ".ax", "memory", "MEMORY.md"))
 	mustExist(t, filepath.Join(tmp, ".ax", "memory", "gotchas.md"))
 	mustExist(t, filepath.Join(tmp, ".ax", "context-policy.md"))
@@ -166,48 +169,108 @@ func TestArchiveMovesProposalToArchive(t *testing.T) {
 	mustExist(t, filepath.Join(tmp, ".ax", "archive", proposalID))
 }
 
-func TestRunEchoesPlanArgument(t *testing.T) {
+func TestRunCreatesRunReport(t *testing.T) {
+	tmp := t.TempDir()
+	prev, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+
 	root := NewRootCmd()
 	out := &bytes.Buffer{}
 	root.SetOut(out)
 	root.SetErr(out)
-	root.SetArgs([]string{"run", "--plan", "p-001-plan.md"})
+	root.SetArgs([]string{"plan", "--from", "p-001"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute plan: %v", err)
+	}
 
+	root = NewRootCmd()
+	out.Reset()
+	root.SetOut(out)
+	root.SetErr(out)
+	root.SetArgs([]string{"run", "--plan", "p-001-plan.md"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("execute run: %v", err)
 	}
-	if got := out.String(); got != "run: plan=p-001-plan.md\n" {
-		t.Fatalf("unexpected output: %q", got)
+	if !strings.Contains(out.String(), "run: created") {
+		t.Fatalf("unexpected output: %q", out.String())
+	}
+
+	runs, err := os.ReadDir(filepath.Join(tmp, ".ax", "runs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 run report, got %d", len(runs))
 	}
 }
 
-func TestDiscoverEchoesTopic(t *testing.T) {
+func TestDiscoverCreatesReport(t *testing.T) {
+	tmp := t.TempDir()
+	prev, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(tmp, "topic-notes.md"), []byte("this file includes context-policy details"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	root := NewRootCmd()
 	out := &bytes.Buffer{}
 	root.SetOut(out)
 	root.SetErr(out)
 	root.SetArgs([]string{"discover", "context-policy"})
-
 	if err := root.Execute(); err != nil {
 		t.Fatalf("execute discover: %v", err)
 	}
-	if got := out.String(); got != "discover: context-policy\n" {
-		t.Fatalf("unexpected output: %q", got)
+	if !strings.Contains(out.String(), "discover: created") {
+		t.Fatalf("unexpected output: %q", out.String())
+	}
+
+	reports, err := os.ReadDir(filepath.Join(tmp, ".ax", "discovery"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("expected 1 discovery report, got %d", len(reports))
 	}
 }
 
-func TestQuickEchoesTask(t *testing.T) {
+func TestQuickCreatesProposalPlanAndRun(t *testing.T) {
+	tmp := t.TempDir()
+	prev, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+
 	root := NewRootCmd()
 	out := &bytes.Buffer{}
 	root.SetOut(out)
 	root.SetErr(out)
 	root.SetArgs([]string{"quick", "fix-tests"})
-
 	if err := root.Execute(); err != nil {
 		t.Fatalf("execute quick: %v", err)
 	}
-	if got := out.String(); got != "quick: fix-tests\n" {
-		t.Fatalf("unexpected output: %q", got)
+	if !strings.Contains(out.String(), "quick: proposal=") {
+		t.Fatalf("unexpected output: %q", out.String())
+	}
+
+	entries, _ := os.ReadDir(filepath.Join(tmp, ".ax", "proposals"))
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 proposal, got %d", len(entries))
+	}
+	plans, _ := os.ReadDir(filepath.Join(tmp, ".ax", "plans"))
+	if len(plans) != 1 {
+		t.Fatalf("expected 1 plan, got %d", len(plans))
+	}
+	runs, _ := os.ReadDir(filepath.Join(tmp, ".ax", "runs"))
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 run report, got %d", len(runs))
 	}
 }
 
