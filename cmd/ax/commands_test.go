@@ -166,6 +166,51 @@ func TestArchiveMovesProposalToArchive(t *testing.T) {
 	mustExist(t, filepath.Join(tmp, ".ax", "archive", proposalID))
 }
 
+func TestRunEchoesPlanArgument(t *testing.T) {
+	root := NewRootCmd()
+	out := &bytes.Buffer{}
+	root.SetOut(out)
+	root.SetErr(out)
+	root.SetArgs([]string{"run", "--plan", "p-001-plan.md"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute run: %v", err)
+	}
+	if got := out.String(); got != "run: plan=p-001-plan.md\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestDiscoverEchoesTopic(t *testing.T) {
+	root := NewRootCmd()
+	out := &bytes.Buffer{}
+	root.SetOut(out)
+	root.SetErr(out)
+	root.SetArgs([]string{"discover", "context-policy"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute discover: %v", err)
+	}
+	if got := out.String(); got != "discover: context-policy\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestQuickEchoesTask(t *testing.T) {
+	root := NewRootCmd()
+	out := &bytes.Buffer{}
+	root.SetOut(out)
+	root.SetErr(out)
+	root.SetArgs([]string{"quick", "fix-tests"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute quick: %v", err)
+	}
+	if got := out.String(); got != "quick: fix-tests\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
 func mustExist(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); err != nil {
