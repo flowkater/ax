@@ -88,6 +88,7 @@ func TestStateInitializesLayout(t *testing.T) {
 	mustExist(t, filepath.Join(tmp, ".ax", "archive"))
 	mustExist(t, filepath.Join(tmp, ".ax", "memory", "MEMORY.md"))
 	mustExist(t, filepath.Join(tmp, ".ax", "memory", "gotchas.md"))
+	mustExist(t, filepath.Join(tmp, ".ax", "context-policy.md"))
 }
 
 func TestVerifyCreatesReportUnderProposal(t *testing.T) {

@@ -239,6 +239,30 @@ func ensureMVPLayout(base string) error {
 		}
 	}
 
+	contextPolicyPath := filepath.Join(base, ".ax", "context-policy.md")
+	if _, err := os.Stat(contextPolicyPath); os.IsNotExist(err) {
+		contextPolicy := `# Context Policy
+
+## Rule
+- Capture only durable facts needed for future task execution.
+
+## Why
+- Prevent context bloat while preserving high-value operational knowledge.
+
+## Enforcement
+- Non-discoverable notes expire after TTL.
+- Duplicate entries are merged by semantic key.
+- Session-local scratch notes are excluded from memory index.
+
+## Scope
+- Applies to propose/plan/run/verify/archive workflow artifacts.
+- Default TTL for non-discoverable context: 7d.
+`
+		if err := os.WriteFile(contextPolicyPath, []byte(contextPolicy), 0o644); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
