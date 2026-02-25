@@ -1,6 +1,7 @@
 package ax
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -99,7 +100,24 @@ func newVerifyCmd() *cobra.Command {
 		Use:   "verify",
 		Short: "Verify proposal against outputs",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(cmd.OutOrStdout(), "verify: proposal=%s\n", proposal)
+			wd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			if err := ensureMVPLayout(wd); err != nil {
+				return err
+			}
+
+			proposalDir, proposalID, err := resolveProposal(wd, proposal)
+			if err != nil {
+				return err
+			}
+			report := fmt.Sprintf("# Verify Report\n\n- proposal: %s\n- verified_at: %s\n- status: pending-manual-review\n", proposalID, time.Now().Format(time.RFC3339))
+			if err := os.WriteFile(filepath.Join(proposalDir, "verify.md"), []byte(report), 0o644); err != nil {
+				return err
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "verify: created %s/verify.md\n", proposalID)
 			return nil
 		},
 	}
@@ -114,7 +132,27 @@ func newArchiveCmd() *cobra.Command {
 		Use:   "archive",
 		Short: "Archive completed proposal",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(cmd.OutOrStdout(), "archive: proposal=%s\n", proposal)
+			wd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			if err := ensureMVPLayout(wd); err != nil {
+				return err
+			}
+
+			proposalDir, proposalID, err := resolveProposal(wd, proposal)
+			if err != nil {
+				return err
+			}
+			archiveDir := filepath.Join(wd, ".ax", "archive", proposalID)
+			if _, err := os.Stat(archiveDir); err == nil {
+				return fmt.Errorf("archive target already exists: %s", archiveDir)
+			}
+			if err := os.Rename(proposalDir, archiveDir); err != nil {
+				return err
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "archive: moved %s\n", proposalID)
 			return nil
 		},
 	}
@@ -207,6 +245,25 @@ func ensureMVPLayout(base string) error {
 func proposalID(title string, now time.Time) string {
 	ts := now.Format("20060102-150405")
 	return ts + "-" + sanitizeToken(title)
+}
+
+func resolveProposal(base, proposal string) (dir string, id string, err error) {
+	if proposal == "" {
+		return "", "", errors.New("proposal is required")
+	}
+
+	if filepath.IsAbs(proposal) || strings.Contains(proposal, string(os.PathSeparator)) {
+		if _, err := os.Stat(proposal); err != nil {
+			return "", "", err
+		}
+		return proposal, filepath.Base(proposal), nil
+	}
+
+	dir = filepath.Join(base, ".ax", "proposals", proposal)
+	if _, err := os.Stat(dir); err != nil {
+		return "", "", err
+	}
+	return dir, proposal, nil
 }
 
 var tokenSanitizer = regexp.MustCompile(`[^a-z0-9]+`)
