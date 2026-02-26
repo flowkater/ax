@@ -938,7 +938,7 @@ func TestRunResumeScaffolding(t *testing.T) {
 		t.Fatalf("run resume: %v", err)
 	}
 
-	runName := singleEntryName(t, filepath.Join(tmp, ".ax", "runs"))
+	runName := latestEntryName(t, filepath.Join(tmp, ".ax", "runs"))
 	runBody := mustRead(t, filepath.Join(tmp, ".ax", "runs", runName))
 	if !strings.Contains(runBody, "- resumed_from: ") {
 		t.Fatalf("expected resumed_from scaffold, got:\n%s", runBody)
@@ -1290,6 +1290,178 @@ func TestRunQualityGateHardLimit(t *testing.T) {
 
 	if _, err := executeAX(t, "run", "--plan", planName, "--tdd", "--review-count", "6", "--force", "--force-reason", "manual override"); err == nil {
 		t.Fatal("expected quality gate hard-limit error")
+	}
+}
+
+func TestVerifyWritesJSONContract(t *testing.T) {
+	tmp := setupTempCWD(t)
+	if _, err := executeAX(t, "propose", "Verify JSON Contract"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "verify", "--proposal", proposalID, "--tests", "pass", "--build", "pass", "--ac", "pass"); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+
+	verifyJSONPath := filepath.Join(tmp, ".ax", "proposals", proposalID, "verify.json")
+	mustExist(t, verifyJSONPath)
+	body := mustRead(t, verifyJSONPath)
+	payload := map[string]any{}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("unmarshal verify.json: %v\n%s", err, body)
+	}
+	if got := fmt.Sprint(payload["verdict"]); got != "PASS" {
+		t.Fatalf("expected verdict PASS, got %q", got)
+	}
+	evidence, ok := payload["evidence"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected evidence map, got %#v", payload["evidence"])
+	}
+	for _, key := range []string{"tests", "build", "criteria"} {
+		if _, exists := evidence[key]; !exists {
+			t.Fatalf("verify.json evidence missing %q", key)
+		}
+	}
+	if failed, ok := payload["failed_checks"].([]any); !ok || len(failed) != 0 {
+		t.Fatalf("expected empty failed_checks for PASS, got %#v", payload["failed_checks"])
+	}
+}
+
+func TestStateLocksAndJournalFlags(t *testing.T) {
+	tmp := setupTempCWD(t)
+	if _, err := executeAX(t, "propose", "State Flags"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "run", "--plan", planName); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	locksOut, err := executeAX(t, "state", "--locks")
+	if err != nil {
+		t.Fatalf("state --locks: %v", err)
+	}
+	if !strings.Contains(locksOut, "locks:") || !strings.Contains(locksOut, "state") {
+		t.Fatalf("unexpected state --locks output:\n%s", locksOut)
+	}
+
+	locksJSONOut, err := executeAX(t, "state", "--locks", "--json")
+	if err != nil {
+		t.Fatalf("state --locks --json: %v", err)
+	}
+	locksPayload := map[string]any{}
+	if err := json.Unmarshal([]byte(locksJSONOut), &locksPayload); err != nil {
+		t.Fatalf("unmarshal locks json: %v\n%s", err, locksJSONOut)
+	}
+	if _, ok := locksPayload["count"]; !ok {
+		t.Fatalf("expected count in locks payload: %#v", locksPayload)
+	}
+
+	journalOut, err := executeAX(t, "state", "--journal")
+	if err != nil {
+		t.Fatalf("state --journal: %v", err)
+	}
+	if !strings.Contains(journalOut, "runtime_journal:") {
+		t.Fatalf("unexpected state --journal output:\n%s", journalOut)
+	}
+
+	journalJSONOut, err := executeAX(t, "state", "--journal", "--json")
+	if err != nil {
+		t.Fatalf("state --journal --json: %v", err)
+	}
+	journalPayload := map[string]any{}
+	if err := json.Unmarshal([]byte(journalJSONOut), &journalPayload); err != nil {
+		t.Fatalf("unmarshal journal json: %v\n%s", err, journalJSONOut)
+	}
+	if _, ok := journalPayload["entries"]; !ok {
+		t.Fatalf("expected entries in journal payload: %#v", journalPayload)
+	}
+}
+
+func TestRunRetryPolicyBlocksAfterExceededRetries(t *testing.T) {
+	tmp := setupTempCWD(t)
+	if _, err := executeAX(t, "propose", "Retry Policy"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+
+	if _, err := executeAX(t, "run", "--plan", planName, "--decision", "reject", "--retry", "0"); err == nil {
+		t.Fatal("expected run reject with retry=0 to fail")
+	}
+
+	st := readState(t, tmp)
+	if !st.Run.Blocked {
+		t.Fatalf("expected blocked=true after retry exceed, got %+v", st.Run)
+	}
+	if st.Run.RetryAttempts == 0 || st.Run.RetryLimit != 0 {
+		t.Fatalf("unexpected retry counters: %+v", st.Run)
+	}
+	if st.Run.ErrorCode == "" || st.Run.ErrorSummary == "" || st.Run.RecoverHint == "" {
+		t.Fatalf("expected run error metadata fields, got %+v", st.Run)
+	}
+
+	if _, err := executeAX(t, "run", "--plan", planName, "--retry", "0"); err == nil {
+		t.Fatal("expected blocked run to fail immediately")
+	}
+}
+
+func TestRunRetryOverrideValidation(t *testing.T) {
+	tmp := setupTempCWD(t)
+	if _, err := executeAX(t, "propose", "Retry Override Range"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+
+	if _, err := executeAX(t, "run", "--plan", planName, "--retry", "6"); err == nil {
+		t.Fatal("expected --retry out of range to fail")
+	}
+}
+
+func TestTUISnapshotAndGuardedAction(t *testing.T) {
+	setupTempCWD(t)
+	if _, err := executeAX(t, "state"); err != nil {
+		t.Fatalf("state init: %v", err)
+	}
+
+	out, err := executeAX(t, "tui", "--snapshot", "--format", "json")
+	if err != nil {
+		t.Fatalf("tui snapshot json: %v", err)
+	}
+	payload := map[string]any{}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("unmarshal tui snapshot json: %v\n%s", err, out)
+	}
+	for _, key := range []string{"generated_at", "screen_a_dashboard", "screen_b_runs", "screen_c_verify", "screen_d_archive", "screen_e_engine"} {
+		if _, ok := payload[key]; !ok {
+			t.Fatalf("tui snapshot missing key %q", key)
+		}
+	}
+	keyHelp, ok := payload["key_binding_help"].([]any)
+	if !ok || len(keyHelp) == 0 {
+		t.Fatalf("expected non-empty key_binding_help, got %#v", payload["key_binding_help"])
+	}
+
+	if _, err := executeAX(t, "tui", "--action", "retry"); err == nil {
+		t.Fatal("expected tui action without --confirm to fail")
+	}
+	actionOut, err := executeAX(t, "tui", "--action", "retry", "--confirm")
+	if err != nil {
+		t.Fatalf("tui guarded action: %v", err)
+	}
+	if !strings.Contains(actionOut, "tui: action=retry confirmed") {
+		t.Fatalf("unexpected tui action output: %s", actionOut)
 	}
 }
 

@@ -20,7 +20,7 @@ func TestRootRegistersCommands(t *testing.T) {
 		t.Fatal("expected node-id persistent flag")
 	}
 
-	want := []string{"propose", "plan", "run", "verify", "archive", "discover", "quick", "state", "recover", "doctor", "review", "compound"}
+	want := []string{"propose", "plan", "run", "verify", "archive", "discover", "quick", "state", "recover", "doctor", "review", "compound", "tui"}
 	for _, name := range want {
 		if _, _, err := root.Find([]string{name}); err != nil {
 			t.Fatalf("expected command %q to be registered: %v", name, err)

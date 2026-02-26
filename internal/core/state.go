@@ -90,6 +90,12 @@ type TDDState struct {
 type RunState struct {
 	LastFailedStep   string `json:"last_failed_step,omitempty"`
 	LastFailureCause string `json:"last_failure_cause,omitempty"`
+	ErrorCode        string `json:"error_code,omitempty"`
+	ErrorSummary     string `json:"error_summary,omitempty"`
+	RecoverHint      string `json:"recover_hint,omitempty"`
+	RetryAttempts    int    `json:"retry_attempts,omitempty"`
+	RetryLimit       int    `json:"retry_limit,omitempty"`
+	Blocked          bool   `json:"blocked,omitempty"`
 }
 
 var allowedTransitions = map[Phase]map[Phase]struct{}{
@@ -275,7 +281,7 @@ func (s *State) Save(base string) error {
 		return err
 	}
 	body = append(body, '\n')
-	return os.WriteFile(path, body, 0o644)
+	return atomicWriteFile(path, body, 0o644)
 }
 
 // SaveState is a package-level convenience helper.
@@ -445,4 +451,40 @@ func ProgressForPhase(phase Phase) int {
 	default:
 		return 0
 	}
+}
+
+func atomicWriteFile(path string, body []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }

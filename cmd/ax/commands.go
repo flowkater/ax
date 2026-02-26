@@ -30,6 +30,7 @@ type runOptions struct {
 	depth       string
 	approval    string
 	resume      bool
+	retry       int
 	decision    string
 	decisionSet bool
 	steerText   string
@@ -125,6 +126,7 @@ func newRunCmd() *cobra.Command {
 		depth       string
 		approval    string
 		resume      bool
+		retry       int
 		decision    string
 		steerText   string
 		reviewCount int
@@ -157,6 +159,7 @@ func newRunCmd() *cobra.Command {
 					depth:       depth,
 					approval:    approval,
 					resume:      resume,
+					retry:       retry,
 					decision:    decision,
 					decisionSet: cmd.Flags().Changed("decision"),
 					steerText:   steerText,
@@ -181,6 +184,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&approval, "approval-policy", defaultApprovalPolicy, "Approval policy (never|on-failure|unless-allow-listed|always)")
 	cmd.Flags().StringVar(&approval, "approval", defaultApprovalPolicy, "Deprecated alias for --approval-policy")
 	cmd.Flags().BoolVar(&resume, "resume", false, "Resume from previous failed step scaffolding")
+	cmd.Flags().IntVar(&retry, "retry", -1, "Retry override for failed runs (0..5)")
 	cmd.Flags().StringVar(&decision, "decision", "accept", "Run decision (accept|reject|steer)")
 	cmd.Flags().StringVar(&steerText, "steer", "", "Steer instruction text when --decision=steer")
 	cmd.Flags().IntVar(&reviewCount, "review-count", 0, "Current review attempt count for TDD quality gate")
@@ -359,7 +363,12 @@ func newQuickCmd() *cobra.Command {
 }
 
 func newStateCmd() *cobra.Command {
-	var jsonOut bool
+	var (
+		jsonOut     bool
+		locksOut    bool
+		journalOut  bool
+		journalSize int
+	)
 	cmd := &cobra.Command{
 		Use:   "state",
 		Short: "Show current ax state",
@@ -372,11 +381,20 @@ func newStateCmd() *cobra.Command {
 				if err := ensureMVPLayout(wd); err != nil {
 					return err
 				}
+				if locksOut {
+					return printLocks(cmd, wd, jsonOut)
+				}
+				if journalOut {
+					return printRuntimeJournalSummary(cmd, wd, jsonOut, journalSize)
+				}
 				return printState(cmd, wd, jsonOut)
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Print machine readable state JSON")
+	cmd.Flags().BoolVar(&locksOut, "locks", false, "Print lock debug information")
+	cmd.Flags().BoolVar(&journalOut, "journal", false, "Print runtime journal summary")
+	cmd.Flags().IntVar(&journalSize, "journal-limit", 10, "Number of latest journal entries to include in summary")
 	return cmd
 }
 
@@ -457,8 +475,13 @@ func newRecoverCmd() *cobra.Command {
 					Phase:     string(st.Phase),
 				})
 				st.Run.LastFailureCause = ""
+				st.Run.ErrorCode = ""
+				st.Run.ErrorSummary = ""
+				st.Run.RecoverHint = ""
+				st.Run.Blocked = false
 				if resolvedMode == "rerun" {
 					st.Run.LastFailedStep = ""
+					st.Run.RetryAttempts = 0
 				}
 				st.ForcePhase(core.PhaseImplementation, "recover:"+resolvedMode, now)
 				st.SetLastResult("recover", resolvedMode, st.Runtime.SessionJournal, now)
@@ -611,6 +634,388 @@ func newCompoundCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&audit, "audit", false, "Include gotcha decay audit placeholders")
 	return cmd
+}
+
+func newTUICmd() *cobra.Command {
+	var (
+		snapshot bool
+		format   string
+		refresh  int
+		action   string
+		confirm  bool
+	)
+	cmd := &cobra.Command{
+		Use:   "tui",
+		Short: "Run interactive TUI, render snapshots, or execute guarded TUI actions",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			wd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			now := time.Now()
+			rt, err := resolveRuntimeContext(cmd, now)
+			if err != nil {
+				return err
+			}
+			if refresh <= 0 {
+				refresh = 1
+			}
+			if err := ensureMVPLayout(wd); err != nil {
+				return err
+			}
+			if strings.TrimSpace(action) != "" {
+				if !confirm {
+					return errors.New("tui action requires --confirm (read-only is default)")
+				}
+				resolved, err := normalizeTUIAction(action)
+				if err != nil {
+					return err
+				}
+				if err := executeTUIAction(wd, rt, resolved, now); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "tui: action=%s confirmed\n", resolved)
+				return nil
+			}
+			if snapshot {
+				snap, err := buildTUISnapshot(wd, refresh, now)
+				if err != nil {
+					return err
+				}
+				switch strings.ToLower(strings.TrimSpace(format)) {
+				case "json":
+					out, err := json.MarshalIndent(snap, "", "  ")
+					if err != nil {
+						return err
+					}
+					fmt.Fprintln(cmd.OutOrStdout(), string(out))
+				case "md":
+					fmt.Fprintln(cmd.OutOrStdout(), renderTUISnapshotMarkdown(snap))
+				default:
+					return fmt.Errorf("invalid --format %q (use json|md)", format)
+				}
+				return nil
+			}
+			return runInteractiveTUI(cmd, wd, rt, refresh)
+		},
+	}
+	cmd.Flags().BoolVar(&snapshot, "snapshot", false, "Render a headless TUI snapshot")
+	cmd.Flags().StringVar(&format, "format", "json", "Snapshot format (json|md)")
+	cmd.Flags().IntVar(&refresh, "refresh", 1, "Refresh interval seconds")
+	cmd.Flags().StringVar(&action, "action", "", "Guarded action (retry|resume|interrupt|rollback|fork|steer)")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "Confirm dangerous TUI action")
+	return cmd
+}
+
+var tuiDangerousActions = []string{"retry", "resume", "interrupt", "rollback", "fork", "steer"}
+
+var tuiKeyBindingHelp = []string{
+	"1-5:switch-screen",
+	"tab/shift+tab:navigate",
+	"r:refresh",
+	"t:retry",
+	"u:resume",
+	"i:interrupt",
+	"b:rollback",
+	"f:fork",
+	"s:steer",
+	"y/n:confirm",
+	"q:quit",
+}
+
+func normalizeTUIAction(action string) (string, error) {
+	resolved := strings.ToLower(strings.TrimSpace(action))
+	for _, allowed := range tuiDangerousActions {
+		if resolved == allowed {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("invalid --action %q (use %s)", action, strings.Join(tuiDangerousActions, "|"))
+}
+
+func executeTUIAction(base string, rt runtimeContext, action string, now time.Time) error {
+	return core.WithStateLock(base, func() error {
+		if err := ensureMVPLayout(base); err != nil {
+			return err
+		}
+		st, err := core.LoadState(base)
+		if err != nil {
+			return err
+		}
+		applyRuntimeState(st, rt, "tui")
+		st.SetLastResult("tui", "action:"+action, filepath.ToSlash(filepath.Join(".ax", "state.yaml")), now)
+		st.ClearLastError()
+		if err := st.Save(base); err != nil {
+			return err
+		}
+		_ = appendRuntimeJournal(base, runtimeJournalEntry{
+			Time:      now.Format(time.RFC3339),
+			SessionID: rt.sessionID,
+			ClusterID: rt.clusterID,
+			NodeID:    rt.nodeID,
+			Command:   "tui",
+			Stage:     "action",
+			Mode:      string(rt.mode),
+			Phase:     string(st.Phase),
+			Artifact:  action,
+		})
+		return nil
+	})
+}
+
+type tuiSnapshot struct {
+	GeneratedAt      string            `json:"generated_at"`
+	ReadOnly         bool              `json:"read_only"`
+	RefreshSeconds   int               `json:"refresh_interval_seconds"`
+	KeyBindingHelp   []string          `json:"key_binding_help"`
+	Dashboard        tuiDashboard      `json:"screen_a_dashboard"`
+	Runs             tuiRuns           `json:"screen_b_runs"`
+	Verify           tuiVerify         `json:"screen_c_verify"`
+	Archive          tuiArchive        `json:"screen_d_archive"`
+	Engine           tuiEngine         `json:"screen_e_engine"`
+	RuntimeJournal   []journalBrief    `json:"runtime_journal_recent"`
+	Warnings         []string          `json:"warnings,omitempty"`
+	RecoveryHint     string            `json:"recovery_hint,omitempty"`
+	CurrentArtifacts map[string]string `json:"current_artifacts,omitempty"`
+}
+
+type tuiDashboard struct {
+	Phase          string `json:"phase"`
+	Progress       int    `json:"progress"`
+	Proposal       string `json:"proposal"`
+	Plan           string `json:"plan"`
+	LastError      string `json:"last_error"`
+	LastResult     string `json:"last_result"`
+	ContextEntries int    `json:"context_entries"`
+}
+
+type tuiRunItem struct {
+	Name       string `json:"name"`
+	UpdatedAt  string `json:"updated_at"`
+	StatusLine string `json:"status_line"`
+}
+
+type tuiRuns struct {
+	Count int          `json:"count"`
+	Items []tuiRunItem `json:"items"`
+}
+
+type tuiVerify struct {
+	Verdict      string   `json:"verdict"`
+	FailedChecks []string `json:"failed_checks"`
+	Criteria     int      `json:"criteria"`
+}
+
+type tuiArchive struct {
+	Count int      `json:"count"`
+	Items []string `json:"items"`
+}
+
+type tuiEngine struct {
+	RuntimeMode    string            `json:"runtime_mode"`
+	SessionID      string            `json:"session_id"`
+	ClusterID      string            `json:"cluster_id"`
+	NodeID         string            `json:"node_id"`
+	ActiveSessions map[string]string `json:"active_sessions"`
+}
+
+type journalBrief struct {
+	Time    string `json:"time"`
+	Command string `json:"command"`
+	Stage   string `json:"stage"`
+	Phase   string `json:"phase"`
+}
+
+func buildTUISnapshot(base string, refresh int, now time.Time) (tuiSnapshot, error) {
+	st, err := core.LoadState(base)
+	if err != nil {
+		return tuiSnapshot{}, err
+	}
+
+	snap := tuiSnapshot{
+		GeneratedAt:    now.Format(time.RFC3339),
+		ReadOnly:       true,
+		RefreshSeconds: refresh,
+		KeyBindingHelp: append([]string(nil), tuiKeyBindingHelp...),
+		Dashboard: tuiDashboard{
+			Phase:          string(st.Phase),
+			Progress:       st.Progress,
+			Proposal:       st.Current.Proposal,
+			Plan:           st.Current.Plan,
+			LastError:      formatLastError(st.LastError),
+			LastResult:     formatLastResult(st.LastResult),
+			ContextEntries: len(st.ContextChain),
+		},
+		Engine: tuiEngine{
+			RuntimeMode:    string(st.Runtime.Mode),
+			SessionID:      st.Runtime.SessionID,
+			ClusterID:      st.Runtime.ClusterID,
+			NodeID:         st.Runtime.NodeID,
+			ActiveSessions: st.Runtime.ActiveSessions,
+		},
+		CurrentArtifacts: map[string]string{
+			"proposal": st.Current.Proposal,
+			"plan":     st.Current.Plan,
+			"run":      st.Current.Run,
+			"verify":   st.Current.Verify,
+		},
+	}
+
+	runsDir := filepath.Join(base, ".ax", "runs")
+	if entries, err := os.ReadDir(runsDir); err == nil {
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() > entries[j].Name() })
+		for i, entry := range entries {
+			if i >= 10 || entry.IsDir() {
+				break
+			}
+			info, _ := entry.Info()
+			statusLine := ""
+			body, _ := os.ReadFile(filepath.Join(runsDir, entry.Name()))
+			for _, line := range strings.Split(string(body), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "- status:") {
+					statusLine = strings.TrimSpace(strings.TrimPrefix(line, "- status:"))
+					break
+				}
+			}
+			snap.Runs.Items = append(snap.Runs.Items, tuiRunItem{
+				Name:       entry.Name(),
+				UpdatedAt:  info.ModTime().UTC().Format(time.RFC3339),
+				StatusLine: emptyFallback(statusLine),
+			})
+		}
+		snap.Runs.Count = len(snap.Runs.Items)
+	}
+
+	verifyPath := ""
+	switch {
+	case strings.TrimSpace(st.Current.Verify) != "":
+		verifyPath = filepath.Join(base, filepath.FromSlash(st.Current.Verify))
+	case strings.TrimSpace(st.Current.Proposal) != "":
+		verifyPath = filepath.Join(base, ".ax", "proposals", st.Current.Proposal, "verify.json")
+	}
+	if strings.TrimSpace(verifyPath) != "" {
+		if strings.HasSuffix(verifyPath, ".md") {
+			verifyPath = strings.TrimSuffix(verifyPath, ".md") + ".json"
+		}
+		if body, err := os.ReadFile(verifyPath); err == nil {
+			var report verifyJSONReport
+			if err := json.Unmarshal(body, &report); err == nil {
+				snap.Verify.Verdict = report.Verdict
+				snap.Verify.Criteria = report.Evidence.Criteria
+				for _, item := range report.FailedChecks {
+					snap.Verify.FailedChecks = append(snap.Verify.FailedChecks, fmt.Sprintf("%s(%s)", item.Code, item.Severity))
+				}
+			}
+		}
+	}
+
+	archiveDir := filepath.Join(base, ".ax", "archive")
+	if entries, err := os.ReadDir(archiveDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				snap.Archive.Items = append(snap.Archive.Items, entry.Name())
+			}
+		}
+		sort.Strings(snap.Archive.Items)
+		snap.Archive.Count = len(snap.Archive.Items)
+	}
+
+	if entries, err := readRuntimeJournalRecent(base, 5); err == nil {
+		for _, entry := range entries {
+			snap.RuntimeJournal = append(snap.RuntimeJournal, journalBrief{
+				Time:    entry.Time,
+				Command: entry.Command,
+				Stage:   entry.Stage,
+				Phase:   entry.Phase,
+			})
+		}
+	}
+
+	if st.Run.Blocked {
+		snap.Warnings = append(snap.Warnings, "run is currently blocked by retry policy")
+	}
+	snap.RecoveryHint = st.Run.RecoverHint
+	return snap, nil
+}
+
+func readRuntimeJournalRecent(base string, limit int) ([]runtimeJournalEntry, error) {
+	path := runtimeJournalPath(base)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []runtimeJournalEntry{}, nil
+		}
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	entries := make([]runtimeJournalEntry, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var entry runtimeJournalEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	if limit > 0 && len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	return entries, nil
+}
+
+func renderTUISnapshotMarkdown(snap tuiSnapshot) string {
+	var b strings.Builder
+	b.WriteString("# TUI Snapshot\n\n")
+	b.WriteString(fmt.Sprintf("- generated_at: %s\n", snap.GeneratedAt))
+	b.WriteString(fmt.Sprintf("- read_only: %t\n", snap.ReadOnly))
+	b.WriteString(fmt.Sprintf("- refresh_interval_seconds: %d\n", snap.RefreshSeconds))
+	b.WriteString(fmt.Sprintf("- key_binding_help: %s\n", strings.Join(snap.KeyBindingHelp, ", ")))
+	b.WriteString("\n## Screen A Dashboard\n")
+	b.WriteString(fmt.Sprintf("- phase: %s\n- progress: %d\n- proposal: %s\n- plan: %s\n- last_result: %s\n- last_error: %s\n",
+		emptyFallback(snap.Dashboard.Phase),
+		snap.Dashboard.Progress,
+		emptyFallback(snap.Dashboard.Proposal),
+		emptyFallback(snap.Dashboard.Plan),
+		emptyFallback(snap.Dashboard.LastResult),
+		emptyFallback(snap.Dashboard.LastError),
+	))
+	b.WriteString("\n## Screen B Runs\n")
+	b.WriteString(fmt.Sprintf("- count: %d\n", snap.Runs.Count))
+	for _, item := range snap.Runs.Items {
+		b.WriteString(fmt.Sprintf("- %s (%s) status=%s\n", item.Name, item.UpdatedAt, emptyFallback(item.StatusLine)))
+	}
+	if len(snap.Runs.Items) == 0 {
+		b.WriteString("- none\n")
+	}
+	b.WriteString("\n## Screen C Verify\n")
+	b.WriteString(fmt.Sprintf("- verdict: %s\n- criteria: %d\n", emptyFallback(snap.Verify.Verdict), snap.Verify.Criteria))
+	if len(snap.Verify.FailedChecks) == 0 {
+		b.WriteString("- failed_checks: none\n")
+	} else {
+		for _, item := range snap.Verify.FailedChecks {
+			b.WriteString("- failed_check: " + item + "\n")
+		}
+	}
+	b.WriteString("\n## Screen D Archive\n")
+	b.WriteString(fmt.Sprintf("- count: %d\n", snap.Archive.Count))
+	if len(snap.Archive.Items) == 0 {
+		b.WriteString("- none\n")
+	} else {
+		for _, item := range snap.Archive.Items {
+			b.WriteString("- " + item + "\n")
+		}
+	}
+	b.WriteString("\n## Screen E Engine\n")
+	b.WriteString(fmt.Sprintf("- runtime_mode: %s\n- session_id: %s\n- cluster_id: %s\n- node_id: %s\n",
+		emptyFallback(snap.Engine.RuntimeMode),
+		emptyFallback(snap.Engine.SessionID),
+		emptyFallback(snap.Engine.ClusterID),
+		emptyFallback(snap.Engine.NodeID),
+	))
+	return b.String()
 }
 
 func ensureMVPLayout(base string) error {
@@ -845,10 +1250,28 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 	if err != nil {
 		return "", 0, err
 	}
+	retryLimit := 2
+	if opts.retry >= 0 {
+		if opts.retry > 5 {
+			return "", 0, fmt.Errorf("invalid --retry value %d (use 0..5)", opts.retry)
+		}
+		retryLimit = opts.retry
+	}
 
 	st, err := core.LoadState(base)
 	if err != nil {
 		return "", 0, err
+	}
+	if st.Run.Blocked && st.Run.RetryAttempts > retryLimit {
+		errMsg := fmt.Sprintf("run blocked: retry attempts exceeded (%d>%d)", st.Run.RetryAttempts, retryLimit)
+		st.SetLastError("E_RUN_BLOCKED", errMsg, now)
+		st.Run.ErrorCode = "E_RUN_BLOCKED"
+		st.Run.ErrorSummary = errMsg
+		st.Run.RecoverHint = "use ax run --resume --retry <n> after resolving root cause"
+		if saveErr := st.Save(base); saveErr != nil {
+			return "", 0, saveErr
+		}
+		return "", 0, errors.New(errMsg)
 	}
 	applyRuntimeState(st, rt, "run")
 	if err := st.Transition(core.PhaseImplementation, "run", now); err != nil {
@@ -884,6 +1307,11 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 	// Early checkpoint for crash/kill recovery.
 	st.Run.LastFailedStep = "run:in-progress"
 	st.Run.LastFailureCause = "interrupted-or-crash"
+	st.Run.ErrorCode = "E_RUN_INTERRUPTED"
+	st.Run.ErrorSummary = "run interrupted or crashed before completion"
+	st.Run.RecoverHint = "ax run --resume"
+	st.Run.RetryLimit = retryLimit
+	st.Run.Blocked = false
 	if opts.tdd && !opts.resume {
 		st.TDD = core.TDDState{
 			Enabled:        true,
@@ -961,8 +1389,21 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 		if err := writeObservabilityLog(failLog, "run_reject", string(core.PhaseImplementation), threadID, startTurnID, errCode, errMsg, now); err != nil {
 			return "", 0, err
 		}
+		st.Run.RetryAttempts++
 		st.Run.LastFailedStep = "decision:reject"
 		st.Run.LastFailureCause = "manual reject"
+		st.Run.ErrorCode = errCode
+		st.Run.ErrorSummary = errMsg
+		st.Run.RetryLimit = retryLimit
+		st.Run.RecoverHint = fmt.Sprintf("resolve issue then run `ax run --plan %s --resume --retry %d`", planID, retryLimit)
+		if st.Run.RetryAttempts > retryLimit {
+			st.Run.Blocked = true
+			st.Run.ErrorCode = "E_RUN_BLOCKED"
+			st.Run.ErrorSummary = fmt.Sprintf("retry attempts exceeded (%d>%d)", st.Run.RetryAttempts, retryLimit)
+			st.Run.RecoverHint = "unblock by increasing --retry (0..5) or reset state after fixing root cause"
+			errCode = "E_RUN_BLOCKED"
+			errMsg = "run blocked by retry policy"
+		}
 		st.SetLastError(errCode, errMsg, now)
 		st.SetLastResult("run", "rejected", filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(failLog))), now)
 		_ = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(failLog))))
@@ -1046,6 +1487,8 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 	report.WriteString(fmt.Sprintf("- depth: %s\n", depth))
 	report.WriteString(fmt.Sprintf("- depth_source: %s\n", depthSource))
 	report.WriteString(fmt.Sprintf("- decision: %s\n", decision))
+	report.WriteString(fmt.Sprintf("- retry_limit: %d\n", retryLimit))
+	report.WriteString(fmt.Sprintf("- retry_attempts: %d\n", st.Run.RetryAttempts))
 	if decision == "steer" {
 		report.WriteString(fmt.Sprintf("- steer_instruction: %s\n", strings.TrimSpace(opts.steerText)))
 	}
@@ -1120,6 +1563,12 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 	st.Current.Run = runName
 	st.Run.LastFailedStep = ""
 	st.Run.LastFailureCause = ""
+	st.Run.ErrorCode = ""
+	st.Run.ErrorSummary = ""
+	st.Run.RecoverHint = ""
+	st.Run.RetryAttempts = 0
+	st.Run.Blocked = false
+	st.Run.RetryLimit = retryLimit
 	compactionTriggered = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "runs", runName))) || compactionTriggered
 	compactionTriggered = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(startLog)))) || compactionTriggered
 	compactionTriggered = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(endLog)))) || compactionTriggered
@@ -1156,6 +1605,57 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 	return runPath, taskCount, nil
 }
 
+type verifyJSONReport struct {
+	Proposal     string                `json:"proposal"`
+	VerifiedAt   string                `json:"verified_at"`
+	Verdict      string                `json:"verdict"`
+	Evidence     verifyJSONEvidence    `json:"evidence"`
+	FailedChecks []verifyJSONCheckItem `json:"failed_checks"`
+}
+
+type verifyJSONEvidence struct {
+	Tests    string `json:"tests"`
+	Build    string `json:"build"`
+	Criteria int    `json:"criteria"`
+}
+
+type verifyJSONCheckItem struct {
+	Code     string `json:"code"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+}
+
+func buildVerifyJSONFailedChecks(unmet []string) []verifyJSONCheckItem {
+	out := make([]verifyJSONCheckItem, 0, len(unmet))
+	for i, item := range unmet {
+		item = strings.TrimSpace(item)
+		if item == "" || strings.EqualFold(item, "none") {
+			continue
+		}
+		severity := "minor"
+		if strings.Contains(item, "실패") || strings.Contains(strings.ToLower(item), "fail") {
+			severity = "major"
+		}
+		out = append(out, verifyJSONCheckItem{
+			Code:     fmt.Sprintf("AX_VERIFY_CHECK_%03d", i+1),
+			Severity: severity,
+			Message:  item,
+		})
+	}
+	return out
+}
+
+func criteriaScoreFromStatus(status core.EvidenceStatus) int {
+	switch status {
+	case core.EvidencePass:
+		return 100
+	case core.EvidenceFail:
+		return 0
+	default:
+		return 50
+	}
+}
+
 func verifyProposal(base, proposal, testsRaw, buildRaw, acRaw string, rt runtimeContext, now time.Time) (reportPath string, proposalID string, err error) {
 	proposalDir, proposalID, err := resolveProposal(base, proposal)
 	if err != nil {
@@ -1170,6 +1670,17 @@ func verifyProposal(base, proposal, testsRaw, buildRaw, acRaw string, rt runtime
 		Acceptance: core.ParseEvidenceStatus(acRaw),
 	}
 	judgment, unmet, next := core.EvaluateVerification(evidence)
+	jsonReport := verifyJSONReport{
+		Proposal:   proposalID,
+		VerifiedAt: now.Format(time.RFC3339),
+		Verdict:    strings.ReplaceAll(string(judgment), " ", "_"),
+		Evidence: verifyJSONEvidence{
+			Tests:    string(evidence.Tests),
+			Build:    string(evidence.Build),
+			Criteria: criteriaScoreFromStatus(evidence.Acceptance),
+		},
+		FailedChecks: buildVerifyJSONFailedChecks(unmet),
+	}
 
 	var b strings.Builder
 	b.WriteString("# Verify Report\n\n")
@@ -1207,6 +1718,14 @@ func verifyProposal(base, proposal, testsRaw, buildRaw, acRaw string, rt runtime
 		b.WriteString(core.FormatVerifyDiff(diff))
 		b.WriteString("- artifact: verify-diff.md\n")
 	}
+	jsonPath := filepath.Join(proposalDir, "verify.json")
+	jsonBody, err := json.MarshalIndent(jsonReport, "", "  ")
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.WriteFile(jsonPath, append(jsonBody, '\n'), 0o644); err != nil {
+		return "", "", err
+	}
 
 	st, err := core.LoadState(base)
 	if err != nil {
@@ -1222,6 +1741,7 @@ func verifyProposal(base, proposal, testsRaw, buildRaw, acRaw string, rt runtime
 	st.Current.Proposal = proposalID
 	st.Current.Verify = filepath.ToSlash(filepath.Join(".ax", "proposals", proposalID, "verify.md"))
 	_ = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "proposals", proposalID, "verify.md")))
+	_ = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "proposals", proposalID, "verify.json")))
 	if len(previousBody) > 0 {
 		_ = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "proposals", proposalID, "verify-diff.md")))
 	}
@@ -1298,6 +1818,7 @@ func archiveProposal(base, proposal string, allowUnverified bool, rt runtimeCont
 		fmt.Sprintf("  - %s", filepath.ToSlash(filepath.Join(".ax", "archive", proposalID, "design.md"))),
 		fmt.Sprintf("  - %s", filepath.ToSlash(filepath.Join(".ax", "archive", proposalID, "tasks.md"))),
 		fmt.Sprintf("  - %s", filepath.ToSlash(filepath.Join(".ax", "archive", proposalID, "verify.md"))),
+		fmt.Sprintf("  - %s", filepath.ToSlash(filepath.Join(".ax", "archive", proposalID, "verify.json"))),
 	}
 	if worktreeSnapshot != "" {
 		metadataLines = append(metadataLines, fmt.Sprintf("  - %s", worktreeSnapshot))
@@ -1698,6 +2219,101 @@ func printState(cmd *cobra.Command, base string, jsonOut bool) error {
 	return nil
 }
 
+func printLocks(cmd *cobra.Command, base string, jsonOut bool) error {
+	locks, err := core.InspectLocks(base)
+	if err != nil {
+		return err
+	}
+	if jsonOut {
+		body, err := json.MarshalIndent(map[string]any{
+			"count": len(locks),
+			"locks": locks,
+		}, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), string(body))
+		return nil
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "locks: %d\n", len(locks))
+	for _, lk := range locks {
+		fmt.Fprintf(cmd.OutOrStdout(), "- %s held=%t stale=%t pid=%d host=%s heartbeat=%s path=%s\n",
+			lk.Name,
+			lk.Held,
+			lk.Stale,
+			lk.PID,
+			emptyFallback(lk.Hostname),
+			emptyFallback(lk.HeartbeatAt),
+			lk.Path,
+		)
+	}
+	if len(locks) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "- none")
+	}
+	return nil
+}
+
+func printRuntimeJournalSummary(cmd *cobra.Command, base string, jsonOut bool, limit int) error {
+	path := runtimeJournalPath(base)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if jsonOut {
+				fmt.Fprintln(cmd.OutOrStdout(), `{"count":0,"entries":[]}`)
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "runtime_journal: none")
+			}
+			return nil
+		}
+		return err
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	entries := make([]runtimeJournalEntry, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry runtimeJournalEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	if len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	if jsonOut {
+		payload := map[string]any{
+			"count":   len(entries),
+			"entries": entries,
+		}
+		out, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), string(out))
+		return nil
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "runtime_journal: %d entries\n", len(entries))
+	for _, entry := range entries {
+		fmt.Fprintf(cmd.OutOrStdout(), "- %s command=%s stage=%s phase=%s session=%s\n",
+			emptyFallback(entry.Time),
+			emptyFallback(entry.Command),
+			emptyFallback(entry.Stage),
+			emptyFallback(entry.Phase),
+			emptyFallback(entry.SessionID),
+		)
+	}
+	if len(entries) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "- none")
+	}
+	return nil
+}
+
 func tierCompletedStepFloor(tier string) int {
 	switch strings.ToUpper(strings.TrimSpace(tier)) {
 	case "T0":
@@ -2026,6 +2642,24 @@ func restoreRuntimeCheckpoint(base string, st *core.State) (runtimeCheckpoint, e
 	}
 	if strings.TrimSpace(st.Run.LastFailureCause) == "" && strings.TrimSpace(cp.Run.LastFailureCause) != "" {
 		st.Run.LastFailureCause = cp.Run.LastFailureCause
+	}
+	if strings.TrimSpace(st.Run.ErrorCode) == "" && strings.TrimSpace(cp.Run.ErrorCode) != "" {
+		st.Run.ErrorCode = cp.Run.ErrorCode
+	}
+	if strings.TrimSpace(st.Run.ErrorSummary) == "" && strings.TrimSpace(cp.Run.ErrorSummary) != "" {
+		st.Run.ErrorSummary = cp.Run.ErrorSummary
+	}
+	if strings.TrimSpace(st.Run.RecoverHint) == "" && strings.TrimSpace(cp.Run.RecoverHint) != "" {
+		st.Run.RecoverHint = cp.Run.RecoverHint
+	}
+	if st.Run.RetryAttempts == 0 && cp.Run.RetryAttempts > 0 {
+		st.Run.RetryAttempts = cp.Run.RetryAttempts
+	}
+	if st.Run.RetryLimit == 0 && cp.Run.RetryLimit > 0 {
+		st.Run.RetryLimit = cp.Run.RetryLimit
+	}
+	if cp.Run.Blocked {
+		st.Run.Blocked = true
 	}
 
 	return cp, nil
