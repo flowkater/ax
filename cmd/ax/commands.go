@@ -45,6 +45,11 @@ type stepTurnMapping struct {
 	Tier   string
 }
 
+type runtimeContext struct {
+	mode      core.RuntimeMode
+	sessionID string
+}
+
 func newProposeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "propose <title>",
@@ -55,15 +60,22 @@ func newProposeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := ensureMVPLayout(wd); err != nil {
-				return err
-			}
-			id, err := createProposal(wd, args[0], time.Now())
+			now := time.Now()
+			rt, err := resolveRuntimeContext(cmd, now)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "propose: created %s\n", id)
-			return nil
+			return core.WithStateLock(wd, func() error {
+				if err := ensureMVPLayout(wd); err != nil {
+					return err
+				}
+				id, err := createProposal(wd, args[0], rt, now)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "propose: created %s\n", id)
+				return nil
+			})
 		},
 	}
 	return cmd
@@ -79,16 +91,22 @@ func newPlanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := ensureMVPLayout(wd); err != nil {
-				return err
-			}
-
-			planFile, err := createPlan(wd, from, time.Now())
+			now := time.Now()
+			rt, err := resolveRuntimeContext(cmd, now)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "plan: created %s\n", filepath.Base(planFile))
-			return nil
+			return core.WithStateLock(wd, func() error {
+				if err := ensureMVPLayout(wd); err != nil {
+					return err
+				}
+				planFile, err := createPlan(wd, from, rt, now)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "plan: created %s\n", filepath.Base(planFile))
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&from, "from", "", "Proposal ID or path")
@@ -120,30 +138,37 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := ensureMVPLayout(wd); err != nil {
-				return err
-			}
-
-			runFile, taskCount, err := runPlan(wd, plan, runOptions{
-				tdd:         tdd,
-				loop:        loop,
-				tier:        tier,
-				depth:       depth,
-				approval:    approval,
-				resume:      resume,
-				decision:    decision,
-				decisionSet: cmd.Flags().Changed("decision"),
-				steerText:   steerText,
-				reviewCount: reviewCount,
-				force:       force,
-				forceReason: forceReason,
-				noWorktree:  noWorktree,
-			}, time.Now())
+			now := time.Now()
+			rt, err := resolveRuntimeContext(cmd, now)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "run: created %s (tasks=%d)\n", filepath.Base(runFile), taskCount)
-			return nil
+			return core.WithStateLock(wd, func() error {
+				if err := ensureMVPLayout(wd); err != nil {
+					return err
+				}
+
+				runFile, taskCount, err := runPlan(wd, plan, runOptions{
+					tdd:         tdd,
+					loop:        loop,
+					tier:        tier,
+					depth:       depth,
+					approval:    approval,
+					resume:      resume,
+					decision:    decision,
+					decisionSet: cmd.Flags().Changed("decision"),
+					steerText:   steerText,
+					reviewCount: reviewCount,
+					force:       force,
+					forceReason: forceReason,
+					noWorktree:  noWorktree,
+				}, rt, now)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "run: created %s (tasks=%d)\n", filepath.Base(runFile), taskCount)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&plan, "plan", "", "Plan ID or path")
@@ -179,16 +204,23 @@ func newVerifyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := ensureMVPLayout(wd); err != nil {
-				return err
-			}
-
-			reportPath, proposalID, err := verifyProposal(wd, proposal, testsRaw, buildRaw, acRaw, time.Now())
+			now := time.Now()
+			rt, err := resolveRuntimeContext(cmd, now)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "verify: created %s\n", filepath.ToSlash(filepath.Join(proposalID, filepath.Base(reportPath))))
-			return nil
+			return core.WithStateLock(wd, func() error {
+				if err := ensureMVPLayout(wd); err != nil {
+					return err
+				}
+
+				reportPath, proposalID, err := verifyProposal(wd, proposal, testsRaw, buildRaw, acRaw, rt, now)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "verify: created %s\n", filepath.ToSlash(filepath.Join(proposalID, filepath.Base(reportPath))))
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&proposal, "proposal", "", "Proposal ID or path")
@@ -212,16 +244,23 @@ func newArchiveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := ensureMVPLayout(wd); err != nil {
-				return err
-			}
-
-			proposalID, err := archiveProposal(wd, proposal, allowUnverifiedArchive, time.Now())
+			now := time.Now()
+			rt, err := resolveRuntimeContext(cmd, now)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "archive: moved %s\n", proposalID)
-			return nil
+			return core.WithStateLock(wd, func() error {
+				if err := ensureMVPLayout(wd); err != nil {
+					return err
+				}
+
+				proposalID, err := archiveProposal(wd, proposal, allowUnverifiedArchive, rt, now)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "archive: moved %s\n", proposalID)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&proposal, "proposal", "", "Proposal ID or path")
@@ -241,16 +280,23 @@ func newDiscoverCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := ensureMVPLayout(wd); err != nil {
-				return err
-			}
-
-			report, matches, err := discoverTopic(wd, args[0], party, time.Now())
+			now := time.Now()
+			rt, err := resolveRuntimeContext(cmd, now)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "discover: created %s (matches=%d)\n", filepath.Base(report), matches)
-			return nil
+			return core.WithStateLock(wd, func() error {
+				if err := ensureMVPLayout(wd); err != nil {
+					return err
+				}
+
+				report, matches, err := discoverTopic(wd, args[0], party, rt, now)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "discover: created %s (matches=%d)\n", filepath.Base(report), matches)
+				return nil
+			})
 		},
 	}
 	cmd.Flags().BoolVar(&party, "party", false, "Include Architect/User/QA persona sections")
@@ -272,30 +318,36 @@ func newQuickCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := ensureMVPLayout(wd); err != nil {
-				return err
-			}
-
 			now := time.Now()
-			if core.ShouldEscalateQuickStats(filesChanged, crossModule, coreTouch) {
-				proposalID, err := createProposal(wd, args[0], now)
-				if err != nil {
-					return err
-				}
-				planFile, err := createPlan(wd, proposalID, now)
-				if err != nil {
-					return err
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "quick: escalated proposal=%s plan=%s\n", proposalID, filepath.Base(planFile))
-				return nil
-			}
-
-			runFile, err := runQuick(wd, args[0], now)
+			rt, err := resolveRuntimeContext(cmd, now)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "quick: completed %s\n", filepath.Base(runFile))
-			return nil
+			return core.WithStateLock(wd, func() error {
+				if err := ensureMVPLayout(wd); err != nil {
+					return err
+				}
+
+				if core.ShouldEscalateQuickStats(filesChanged, crossModule, coreTouch) {
+					proposalID, err := createProposal(wd, args[0], rt, now)
+					if err != nil {
+						return err
+					}
+					planFile, err := createPlan(wd, proposalID, rt, now)
+					if err != nil {
+						return err
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "quick: escalated proposal=%s plan=%s\n", proposalID, filepath.Base(planFile))
+					return nil
+				}
+
+				runFile, err := runQuick(wd, args[0], rt, now)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "quick: completed %s\n", filepath.Base(runFile))
+				return nil
+			})
 		},
 	}
 	cmd.Flags().IntVar(&filesChanged, "files-changed", 0, "Estimated changed files for quick escalation")
@@ -314,13 +366,125 @@ func newStateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := ensureMVPLayout(wd); err != nil {
-				return err
-			}
-			return printState(cmd, wd, jsonOut)
+			return core.WithStateLock(wd, func() error {
+				if err := ensureMVPLayout(wd); err != nil {
+					return err
+				}
+				return printState(cmd, wd, jsonOut)
+			})
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Print machine readable state JSON")
+	return cmd
+}
+
+func newRecoverCmd() *cobra.Command {
+	var strategy string
+	cmd := &cobra.Command{
+		Use:   "recover",
+		Short: "Recover runtime/session state after interruption",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			wd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			now := time.Now()
+			rt, err := resolveRuntimeContext(cmd, now)
+			if err != nil {
+				return err
+			}
+			return core.WithStateLock(wd, func() error {
+				if err := ensureMVPLayout(wd); err != nil {
+					return err
+				}
+				st, err := core.LoadState(wd)
+				if err != nil {
+					return err
+				}
+				applyRuntimeState(st, rt, "recover")
+				mode := strings.TrimSpace(strings.ToLower(strategy))
+				switch mode {
+				case "", "auto":
+					mode = "auto"
+				case "resume", "rerun":
+				default:
+					return fmt.Errorf("invalid recover strategy %q (use auto|resume|rerun)", strategy)
+				}
+				if mode == "resume" && !st.TDD.Enabled {
+					return errors.New("recover resume unavailable: no persisted tdd state")
+				}
+				st.Run.LastFailureCause = ""
+				if mode == "rerun" {
+					st.Run.LastFailedStep = ""
+				}
+				st.ForcePhase(core.PhaseImplementation, "recover:"+mode, now)
+				st.SetLastResult("recover", mode, filepath.ToSlash(filepath.Join(".ax", "state.yaml")), now)
+				st.ClearLastError()
+				if err := st.Save(wd); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "recover: strategy=%s session=%s phase=%s\n", mode, st.Runtime.SessionID, st.Phase)
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&strategy, "strategy", "auto", "Recovery strategy (auto|resume|rerun)")
+	return cmd
+}
+
+func newDoctorCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "doctor",
+		Short: "Runtime diagnostics",
+	}
+
+	var jsonOut bool
+	runtimeCmd := &cobra.Command{
+		Use:   "runtime",
+		Short: "Inspect runtime lock/state health",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			wd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			return core.WithStateLock(wd, func() error {
+				if err := ensureMVPLayout(wd); err != nil {
+					return err
+				}
+				st, err := core.LoadState(wd)
+				if err != nil {
+					return err
+				}
+				lockDir := filepath.Join(wd, ".ax", "locks")
+				entries, _ := os.ReadDir(lockDir)
+				payload := map[string]any{
+					"phase":           st.Phase,
+					"runtime_mode":    st.Runtime.Mode,
+					"session_id":      st.Runtime.SessionID,
+					"active_sessions": len(st.Runtime.ActiveSessions),
+					"lock_files":      len(entries),
+					"state_file":      filepath.ToSlash(filepath.Join(".ax", "state.yaml")),
+				}
+				if jsonOut {
+					body, err := json.MarshalIndent(payload, "", "  ")
+					if err != nil {
+						return err
+					}
+					fmt.Fprintln(cmd.OutOrStdout(), string(body))
+					return nil
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "phase: %s\n", payload["phase"])
+				fmt.Fprintf(cmd.OutOrStdout(), "runtime mode: %s\n", payload["runtime_mode"])
+				fmt.Fprintf(cmd.OutOrStdout(), "session id: %s\n", emptyFallback(fmt.Sprint(payload["session_id"])))
+				fmt.Fprintf(cmd.OutOrStdout(), "active sessions: %d\n", payload["active_sessions"])
+				fmt.Fprintf(cmd.OutOrStdout(), "lock files: %d\n", payload["lock_files"])
+				fmt.Fprintf(cmd.OutOrStdout(), "state file: %s\n", payload["state_file"])
+				return nil
+			})
+		},
+	}
+	runtimeCmd.Flags().BoolVar(&jsonOut, "json", false, "Print machine readable runtime diagnostics")
+	cmd.AddCommand(runtimeCmd)
 	return cmd
 }
 
@@ -334,15 +498,22 @@ func newReviewCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := ensureMVPLayout(wd); err != nil {
-				return err
-			}
-			report, err := createReview(wd, proposal, time.Now())
+			now := time.Now()
+			rt, err := resolveRuntimeContext(cmd, now)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "review: created %s\n", filepath.Base(report))
-			return nil
+			return core.WithStateLock(wd, func() error {
+				if err := ensureMVPLayout(wd); err != nil {
+					return err
+				}
+				report, err := createReview(wd, proposal, rt, now)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "review: created %s\n", filepath.Base(report))
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&proposal, "proposal", "", "Proposal ID or path")
@@ -360,15 +531,22 @@ func newCompoundCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := ensureMVPLayout(wd); err != nil {
-				return err
-			}
-			report, err := createCompound(wd, audit, time.Now())
+			now := time.Now()
+			rt, err := resolveRuntimeContext(cmd, now)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "compound: created %s\n", filepath.Base(report))
-			return nil
+			return core.WithStateLock(wd, func() error {
+				if err := ensureMVPLayout(wd); err != nil {
+					return err
+				}
+				report, err := createCompound(wd, audit, rt, now)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "compound: created %s\n", filepath.Base(report))
+				return nil
+			})
 		},
 	}
 	cmd.Flags().BoolVar(&audit, "audit", false, "Include gotcha decay audit placeholders")
@@ -447,7 +625,7 @@ func ensureMVPLayout(base string) error {
 	return st.Save(base)
 }
 
-func createProposal(base, title string, now time.Time) (string, error) {
+func createProposal(base, title string, rt runtimeContext, now time.Time) (string, error) {
 	id := proposalID(title, now)
 	proposalDir := filepath.Join(base, ".ax", "proposals", id)
 	if err := os.MkdirAll(filepath.Join(proposalDir, "specs"), 0o755); err != nil {
@@ -497,6 +675,7 @@ func createProposal(base, title string, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	applyRuntimeState(st, rt, "propose")
 	if err := st.Transition(core.PhaseProposal, "propose", now); err != nil {
 		return "", err
 	}
@@ -521,7 +700,7 @@ func defaultProposalTasks() string {
 	return strings.Join(lines, "\n")
 }
 
-func createPlan(base, from string, now time.Time) (string, error) {
+func createPlan(base, from string, rt runtimeContext, now time.Time) (string, error) {
 	proposalDir, proposalID, err := resolveProposal(base, from)
 	if err != nil {
 		return "", fmt.Errorf("plan --from requires existing proposal: %w", err)
@@ -564,6 +743,7 @@ func createPlan(base, from string, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	applyRuntimeState(st, rt, "plan")
 	if err := st.Transition(core.PhasePlanning, "plan", now); err != nil {
 		return "", err
 	}
@@ -578,17 +758,10 @@ func createPlan(base, from string, now time.Time) (string, error) {
 	return planFile, nil
 }
 
-func runPlan(base, plan string, opts runOptions, now time.Time) (string, int, error) {
+func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Time) (string, int, error) {
 	planPath, planID, err := resolvePlan(base, plan)
 	if err != nil {
 		return "", 0, err
-	}
-	body, err := os.ReadFile(planPath)
-	if err != nil {
-		return "", 0, err
-	}
-	if !strings.Contains(string(body), "# Plan") {
-		return "", 0, errors.New("invalid plan format: missing # Plan")
 	}
 
 	if err := core.ValidateQualityGate(opts.reviewCount, opts.force, opts.forceReason); err != nil {
@@ -615,8 +788,54 @@ func runPlan(base, plan string, opts runOptions, now time.Time) (string, int, er
 	if err != nil {
 		return "", 0, err
 	}
+	applyRuntimeState(st, rt, "run")
 	if err := st.Transition(core.PhaseImplementation, "run", now); err != nil {
 		return "", 0, err
+	}
+	prevTDD := st.TDD
+
+	runName := fmt.Sprintf("%s-run-%s.md", sanitizeToken(planID), now.Format("20060102-150405"))
+	runPath := filepath.Join(base, ".ax", "runs", runName)
+	startLog := filepath.Join(base, ".ax", "logs", fmt.Sprintf("%s-%s-start.yaml", sanitizeToken(planID), now.Format("20060102-150405")))
+	endLog := filepath.Join(base, ".ax", "logs", fmt.Sprintf("%s-%s-end.yaml", sanitizeToken(planID), now.Format("20060102-150405")))
+	failLog := filepath.Join(base, ".ax", "logs", fmt.Sprintf("%s-%s-fail.yaml", sanitizeToken(planID), now.Format("20060102-150405")))
+	compactionLog := filepath.Join(base, ".ax", "logs", fmt.Sprintf("%s-%s-compaction.yaml", sanitizeToken(planID), now.Format("20060102-150405")))
+
+	threadID := syntheticThreadID(st.Runtime.SessionID + "-" + planID)
+	if err := writeObservabilityLog(startLog, "run_start", string(core.PhaseImplementation), threadID, "", "", "run scaffolding started", now); err != nil {
+		return "", 0, err
+	}
+
+	// Early checkpoint for crash/kill recovery.
+	st.Run.LastFailedStep = "run:in-progress"
+	st.Run.LastFailureCause = "interrupted-or-crash"
+	if opts.tdd && !opts.resume {
+		st.TDD = core.TDDState{
+			Enabled:        true,
+			CurrentTier:    "T0",
+			CurrentStep:    "checkpoint",
+			CompletedSteps: 0,
+			TotalSteps:     9,
+			Depth:          strings.TrimSpace(opts.depth),
+			DepthSource:    ternary(strings.TrimSpace(opts.depth) == "", "auto", "user"),
+			ApprovalPolicy: opts.approval,
+			Resume:         opts.resume,
+			CompletedTiers: nil,
+		}
+	} else if !opts.tdd {
+		st.TDD = core.TDDState{}
+	}
+	st.SetLastResult("run", "started", filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(startLog))), now)
+	if err := st.Save(base); err != nil {
+		return "", 0, err
+	}
+
+	body, err := os.ReadFile(planPath)
+	if err != nil {
+		return "", 0, err
+	}
+	if !strings.Contains(string(body), "# Plan") {
+		return "", 0, errors.New("invalid plan format: missing # Plan")
 	}
 
 	affected := core.AnalyzeAffectedDirectories(string(body), planPath)
@@ -628,26 +847,13 @@ func runPlan(base, plan string, opts runOptions, now time.Time) (string, int, er
 	tddState := core.TDDState{}
 	tddProgress := "disabled"
 	if opts.tdd {
-		tddState, tddProgress, err = core.ResolveTDDProgression(st.TDD, opts.resume, string(depth), depthSource, opts.approval)
+		tddState, tddProgress, err = core.ResolveTDDProgression(prevTDD, opts.resume, string(depth), depthSource, opts.approval)
 		if err != nil {
 			return "", 0, err
 		}
 	}
-
-	runName := fmt.Sprintf("%s-run-%s.md", sanitizeToken(planID), now.Format("20060102-150405"))
-	runPath := filepath.Join(base, ".ax", "runs", runName)
-	startLog := filepath.Join(base, ".ax", "logs", fmt.Sprintf("%s-%s-start.yaml", sanitizeToken(planID), now.Format("20060102-150405")))
-	endLog := filepath.Join(base, ".ax", "logs", fmt.Sprintf("%s-%s-end.yaml", sanitizeToken(planID), now.Format("20060102-150405")))
-	failLog := filepath.Join(base, ".ax", "logs", fmt.Sprintf("%s-%s-fail.yaml", sanitizeToken(planID), now.Format("20060102-150405")))
-	compactionLog := filepath.Join(base, ".ax", "logs", fmt.Sprintf("%s-%s-compaction.yaml", sanitizeToken(planID), now.Format("20060102-150405")))
-
-	threadID := syntheticThreadID(planID)
 	stepTurn := buildStepTurnMappings(taskCount, opts.tdd, tddState)
 	startTurnID, endTurnID := firstLastTurnID(stepTurn)
-
-	if err := writeObservabilityLog(startLog, "run_start", string(core.PhaseImplementation), threadID, startTurnID, "", "run scaffolding started", now); err != nil {
-		return "", 0, err
-	}
 
 	if decision == "reject" {
 		rejectPolicy, evalErr := core.EvaluateApprovalPolicy(opts.approval, core.PhaseImplementation, decision, true)
@@ -680,12 +886,21 @@ func runPlan(base, plan string, opts runOptions, now time.Time) (string, int, er
 		proposalRef := proposalRefFromPlan(planID, string(body), st.Current.Proposal)
 		worktreeMode = "enabled"
 		worktreeDir := filepath.Join(base, ".ax", "worktrees", sanitizeToken(proposalRef))
+		if st.Runtime.Mode == core.RuntimeModeWorktree {
+			worktreeDir = filepath.Join(worktreeDir, sanitizeToken(st.Runtime.SessionID))
+		}
 		if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
 			return "", 0, err
 		}
-		worktreeRel = filepath.ToSlash(filepath.Join(".ax", "worktrees", sanitizeToken(proposalRef)))
+		if rel, relErr := filepath.Rel(base, worktreeDir); relErr == nil {
+			worktreeRel = filepath.ToSlash(rel)
+		} else {
+			worktreeRel = filepath.ToSlash(strings.TrimPrefix(worktreeDir, filepath.Clean(base)+string(os.PathSeparator)))
+		}
 		worktreeMeta := strings.Join([]string{
 			"proposal_id: " + proposalRef,
+			"session_id: " + st.Runtime.SessionID,
+			"runtime_mode: " + string(st.Runtime.Mode),
 			"created_at: " + now.Format(time.RFC3339),
 			"status: prepared",
 			"",
@@ -710,6 +925,8 @@ func runPlan(base, plan string, opts runOptions, now time.Time) (string, int, er
 	report.WriteString("# Run Report\n\n")
 	report.WriteString(fmt.Sprintf("- plan: %s\n", planID))
 	report.WriteString(fmt.Sprintf("- executed_at: %s\n", now.Format(time.RFC3339)))
+	report.WriteString(fmt.Sprintf("- runtime_mode: %s\n", st.Runtime.Mode))
+	report.WriteString(fmt.Sprintf("- session_id: %s\n", st.Runtime.SessionID))
 	report.WriteString(fmt.Sprintf("- detected_tasks: %d\n", taskCount))
 	report.WriteString(fmt.Sprintf("- approval_policy: %s\n", opts.approval))
 	report.WriteString(fmt.Sprintf("- approval_required: %t\n", approvalPolicy.Required))
@@ -818,7 +1035,7 @@ func runPlan(base, plan string, opts runOptions, now time.Time) (string, int, er
 	return runPath, taskCount, nil
 }
 
-func verifyProposal(base, proposal, testsRaw, buildRaw, acRaw string, now time.Time) (reportPath string, proposalID string, err error) {
+func verifyProposal(base, proposal, testsRaw, buildRaw, acRaw string, rt runtimeContext, now time.Time) (reportPath string, proposalID string, err error) {
 	proposalDir, proposalID, err := resolveProposal(base, proposal)
 	if err != nil {
 		return "", "", err
@@ -874,6 +1091,7 @@ func verifyProposal(base, proposal, testsRaw, buildRaw, acRaw string, now time.T
 	if err != nil {
 		return "", "", err
 	}
+	applyRuntimeState(st, rt, "verify")
 	if err := st.Transition(core.PhaseVerification, "verify", now); err != nil {
 		return "", "", err
 	}
@@ -895,10 +1113,11 @@ func verifyProposal(base, proposal, testsRaw, buildRaw, acRaw string, now time.T
 	return reportPath, proposalID, nil
 }
 
-func archiveProposal(base, proposal string, allowUnverified bool, now time.Time) (string, error) {
+func archiveProposal(base, proposal string, allowUnverified bool, rt runtimeContext, now time.Time) (string, error) {
 	if archivedDir, archivedID, ok := resolveArchivedProposal(base, proposal); ok {
 		st, err := core.LoadState(base)
 		if err == nil {
+			applyRuntimeState(st, rt, "archive")
 			st.Current.Proposal = archivedID
 			_ = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "archive", archivedID, "archive-metadata.yaml")))
 			st.SetLastResult("archive", "archived", filepath.ToSlash(filepath.Join(".ax", "archive", archivedID)), now)
@@ -926,6 +1145,7 @@ func archiveProposal(base, proposal string, allowUnverified bool, now time.Time)
 	if err != nil {
 		return "", err
 	}
+	applyRuntimeState(st, rt, "archive")
 	if err := st.Transition(core.PhaseArchived, "archive", now); err != nil {
 		return "", err
 	}
@@ -979,7 +1199,7 @@ func archiveProposal(base, proposal string, allowUnverified bool, now time.Time)
 	return proposalID, nil
 }
 
-func discoverTopic(base, topic string, party bool, now time.Time) (string, int, error) {
+func discoverTopic(base, topic string, party bool, rt runtimeContext, now time.Time) (string, int, error) {
 	needle := strings.ToLower(strings.TrimSpace(topic))
 	if needle == "" {
 		return "", 0, errors.New("topic is required")
@@ -1073,6 +1293,7 @@ func discoverTopic(base, topic string, party bool, now time.Time) (string, int, 
 	if err != nil {
 		return "", 0, err
 	}
+	applyRuntimeState(st, rt, "discover")
 	if err := st.Transition(core.PhaseDiscovery, "discover", now); err != nil {
 		return "", 0, err
 	}
@@ -1090,11 +1311,12 @@ func discoverTopic(base, topic string, party bool, now time.Time) (string, int, 
 	return reportPath, len(matches), nil
 }
 
-func runQuick(base, task string, now time.Time) (string, error) {
+func runQuick(base, task string, rt runtimeContext, now time.Time) (string, error) {
 	st, err := core.LoadState(base)
 	if err != nil {
 		return "", err
 	}
+	applyRuntimeState(st, rt, "quick")
 	previousPhase := st.Phase
 	if err := st.Transition(core.PhaseImplementation, "quick", now); err != nil {
 		return "", err
@@ -1130,7 +1352,7 @@ func runQuick(base, task string, now time.Time) (string, error) {
 	return runPath, nil
 }
 
-func createReview(base, proposal string, now time.Time) (string, error) {
+func createReview(base, proposal string, rt runtimeContext, now time.Time) (string, error) {
 	_, proposalID, err := resolveProposal(base, proposal)
 	if err != nil {
 		return "", err
@@ -1168,6 +1390,7 @@ func createReview(base, proposal string, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	applyRuntimeState(st, rt, "review")
 	st.Current.Review = filepath.ToSlash(filepath.Join(".ax", "reviews", reviewName))
 	_ = st.AddContext(st.Current.Review)
 	st.SetLastResult("review", "created", st.Current.Review, now)
@@ -1179,7 +1402,7 @@ func createReview(base, proposal string, now time.Time) (string, error) {
 	return reviewPath, nil
 }
 
-func createCompound(base string, audit bool, now time.Time) (string, error) {
+func createCompound(base string, audit bool, rt runtimeContext, now time.Time) (string, error) {
 	reportName := fmt.Sprintf("compound-%s.md", now.Format("20060102-150405"))
 	reportPath := filepath.Join(base, ".ax", "compound", reportName)
 	gotchasPath := filepath.Join(base, ".ax", "memory", "gotchas.md")
@@ -1219,6 +1442,7 @@ func createCompound(base string, audit bool, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	applyRuntimeState(st, rt, "compound")
 	st.Current.Compound = filepath.ToSlash(filepath.Join(".ax", "compound", reportName))
 	_ = st.AddContext(st.Current.Compound)
 	st.SetLastResult("compound", "created", st.Current.Compound, now)
@@ -1228,6 +1452,54 @@ func createCompound(base string, audit bool, now time.Time) (string, error) {
 	}
 
 	return reportPath, nil
+}
+
+func resolveRuntimeContext(cmd *cobra.Command, now time.Time) (runtimeContext, error) {
+	rawMode, err := cmd.Root().PersistentFlags().GetString("runtime-mode")
+	if err != nil {
+		return runtimeContext{}, err
+	}
+	mode, err := core.ResolveRuntimeMode(rawMode)
+	if err != nil {
+		return runtimeContext{}, err
+	}
+	sessionID, err := cmd.Root().PersistentFlags().GetString("session-id")
+	if err != nil {
+		return runtimeContext{}, err
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		sessionID = core.NewSessionID(now)
+	}
+	return runtimeContext{
+		mode:      mode,
+		sessionID: sessionID,
+	}, nil
+}
+
+func applyRuntimeState(st *core.State, rt runtimeContext, command string) {
+	if st == nil {
+		return
+	}
+	if rt.mode == "" {
+		rt.mode = core.RuntimeModeSingle
+	}
+	st.Runtime.Mode = rt.mode
+	if strings.TrimSpace(rt.sessionID) == "" {
+		rt.sessionID = core.NewSessionID(time.Now())
+	}
+	st.Runtime.SessionID = rt.sessionID
+	if st.Runtime.ActiveSessions == nil {
+		st.Runtime.ActiveSessions = map[string]string{}
+	}
+	st.Runtime.ActiveSessions[rt.sessionID] = command
+	if len(st.Runtime.ActiveSessions) > 64 {
+		// best-effort pruning: keep current session only when map grows too large.
+		current := st.Runtime.ActiveSessions[rt.sessionID]
+		st.Runtime.ActiveSessions = map[string]string{
+			rt.sessionID: current,
+		}
+	}
 }
 
 func printState(cmd *cobra.Command, base string, jsonOut bool) error {
@@ -1245,6 +1517,8 @@ func printState(cmd *cobra.Command, base string, jsonOut bool) error {
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "phase: %s\n", st.Phase)
+	fmt.Fprintf(cmd.OutOrStdout(), "runtime mode: %s\n", emptyFallback(string(st.Runtime.Mode)))
+	fmt.Fprintf(cmd.OutOrStdout(), "session id: %s\n", emptyFallback(st.Runtime.SessionID))
 	fmt.Fprintf(cmd.OutOrStdout(), "current proposal: %s\n", emptyFallback(st.Current.Proposal))
 	fmt.Fprintf(cmd.OutOrStdout(), "current plan: %s\n", emptyFallback(st.Current.Plan))
 	fmt.Fprintf(cmd.OutOrStdout(), "last result: %s\n", formatLastResult(st.LastResult))
@@ -1347,12 +1621,36 @@ func firstLastTurnID(items []stepTurnMapping) (string, string) {
 
 func finalizeWorktreeForArchive(base, archiveDir, proposalID string, now time.Time) (string, error) {
 	worktreeDir := filepath.Join(base, ".ax", "worktrees", sanitizeToken(proposalID))
-	metaPath := filepath.Join(worktreeDir, "worktree.yaml")
-	if _, err := os.Stat(metaPath); err != nil {
+	if _, err := os.Stat(worktreeDir); err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
 		}
 		return "", err
+	}
+
+	var discovered []string
+	err := filepath.WalkDir(worktreeDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if filepath.Base(path) != "worktree.yaml" {
+			return nil
+		}
+		rel, relErr := filepath.Rel(base, path)
+		if relErr != nil {
+			return relErr
+		}
+		discovered = append(discovered, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(discovered) == 0 {
+		return "", nil
 	}
 
 	snapshot := strings.Join([]string{
@@ -1361,6 +1659,14 @@ func finalizeWorktreeForArchive(base, archiveDir, proposalID string, now time.Ti
 		"status: merged_and_cleaned",
 		"merge_result: success",
 		"cleanup_result: success",
+		"discovered_worktrees:",
+		func() string {
+			var b strings.Builder
+			for _, p := range discovered {
+				b.WriteString("  - " + p + "\n")
+			}
+			return strings.TrimRight(b.String(), "\n")
+		}(),
 		"",
 	}, "\n")
 

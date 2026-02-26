@@ -9,6 +9,8 @@ func NewRootCmd() *cobra.Command {
 		Long:         "ax v2 MVP command-line interface for propose-plan-run-verify-archive workflows.",
 		SilenceUsage: true,
 	}
+	root.PersistentFlags().String("runtime-mode", "single", "Runtime mode (single|shared|worktree|auto)")
+	root.PersistentFlags().String("session-id", "", "Explicit runtime session id (optional)")
 
 	root.AddCommand(newProposeCmd())
 	root.AddCommand(newPlanCmd())
@@ -18,6 +20,8 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newDiscoverCmd())
 	root.AddCommand(newQuickCmd())
 	root.AddCommand(newStateCmd())
+	root.AddCommand(newRecoverCmd())
+	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newReviewCmd())
 	root.AddCommand(newCompoundCmd())
 

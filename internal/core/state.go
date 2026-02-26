@@ -32,17 +32,18 @@ const (
 
 // State keeps machine-parsable workflow status for ax.
 type State struct {
-	Version        string      `json:"version"`
-	Phase          Phase       `json:"phase"`
-	Current        CurrentRefs `json:"current"`
-	ContextChain   []string    `json:"context_chain,omitempty"`
-	TransitionedAt string      `json:"transitioned_at,omitempty"`
-	TriggerCommand string      `json:"trigger_command,omitempty"`
-	LastResult     LastResult  `json:"last_result,omitempty"`
-	LastError      *LastError  `json:"last_error,omitempty"`
-	Run            RunState    `json:"run,omitempty"`
-	TDD            TDDState    `json:"tdd"`
-	Progress       int         `json:"progress"`
+	Version        string       `json:"version"`
+	Phase          Phase        `json:"phase"`
+	Current        CurrentRefs  `json:"current"`
+	Runtime        RuntimeState `json:"runtime,omitempty"`
+	ContextChain   []string     `json:"context_chain,omitempty"`
+	TransitionedAt string       `json:"transitioned_at,omitempty"`
+	TriggerCommand string       `json:"trigger_command,omitempty"`
+	LastResult     LastResult   `json:"last_result,omitempty"`
+	LastError      *LastError   `json:"last_error,omitempty"`
+	Run            RunState     `json:"run,omitempty"`
+	TDD            TDDState     `json:"tdd"`
+	Progress       int          `json:"progress"`
 }
 
 // CurrentRefs points to active artifacts.
@@ -135,9 +136,12 @@ func StatePath(base string) string {
 // DefaultState returns a new initialized state.
 func DefaultState(now time.Time) *State {
 	return &State{
-		Version:        "v2",
-		Phase:          PhaseIdle,
-		Current:        CurrentRefs{},
+		Version: "v2",
+		Phase:   PhaseIdle,
+		Current: CurrentRefs{},
+		Runtime: RuntimeState{
+			Mode: RuntimeModeSingle,
+		},
 		TDD:            TDDState{},
 		Progress:       ProgressForPhase(PhaseIdle),
 		TransitionedAt: now.Format(time.RFC3339),
@@ -192,6 +196,12 @@ func (s *State) normalize() {
 	}
 	if s.Current == (CurrentRefs{}) {
 		s.Current = CurrentRefs{}
+	}
+	if s.Runtime.Mode == "" {
+		s.Runtime.Mode = RuntimeModeSingle
+	}
+	if s.Runtime.ActiveSessions == nil {
+		s.Runtime.ActiveSessions = map[string]string{}
 	}
 	if s.ContextChain == nil {
 		s.ContextChain = []string{}
@@ -253,6 +263,15 @@ func (s *State) Transition(next Phase, trigger string, at time.Time) error {
 		return fmt.Errorf("ERR_INVALID_PHASE_TRANSITION: empty target")
 	}
 	if s.Phase == next {
+		s.TransitionedAt = at.Format(time.RFC3339)
+		s.TriggerCommand = trigger
+		s.Progress = ProgressForPhase(s.Phase)
+		return nil
+	}
+	// In shared/worktree runtime, global phase is advisory and must not block
+	// independent proposal lifecycles.
+	if s.Runtime.Mode == RuntimeModeShared || s.Runtime.Mode == RuntimeModeWorktree || s.Runtime.Mode == RuntimeModeAuto {
+		s.Phase = next
 		s.TransitionedAt = at.Format(time.RFC3339)
 		s.TriggerCommand = trigger
 		s.Progress = ProgressForPhase(s.Phase)

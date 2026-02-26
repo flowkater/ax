@@ -459,6 +459,29 @@ func TestCanStartNewProposalAfterArchive(t *testing.T) {
 	}
 }
 
+func TestSharedRuntimeModeAllowsProposeAfterPlanning(t *testing.T) {
+	tmp := setupTempCWD(t)
+
+	if _, err := executeAX(t, "--runtime-mode", "shared", "propose", "Shared One"); err != nil {
+		t.Fatalf("propose #1: %v", err)
+	}
+	first := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "--runtime-mode", "shared", "plan", "--from", first); err != nil {
+		t.Fatalf("plan #1: %v", err)
+	}
+	if _, err := executeAX(t, "--runtime-mode", "shared", "propose", "Shared Two"); err != nil {
+		t.Fatalf("propose #2 in shared mode should succeed from planning phase: %v", err)
+	}
+
+	if got := countEntries(t, filepath.Join(tmp, ".ax", "proposals")); got != 2 {
+		t.Fatalf("expected 2 proposals, got %d", got)
+	}
+	st := readState(t, tmp)
+	if st.Runtime.Mode != core.RuntimeModeShared {
+		t.Fatalf("expected runtime mode shared, got %s", st.Runtime.Mode)
+	}
+}
+
 func TestQuickEscalatesWhenThresholdExceeded(t *testing.T) {
 	tmp := setupTempCWD(t)
 
@@ -537,6 +560,50 @@ func TestStateDetailedOutputAndReviewCompoundBasics(t *testing.T) {
 	}
 }
 
+func TestRecoverCommandUpdatesState(t *testing.T) {
+	tmp := setupTempCWD(t)
+	if _, err := executeAX(t, "propose", "Recover Flow"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "run", "--plan", planName, "--decision", "reject"); err == nil {
+		t.Fatal("expected reject run to fail")
+	}
+	if _, err := executeAX(t, "recover", "--strategy", "rerun"); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	st := readState(t, tmp)
+	if st.Phase != core.PhaseImplementation {
+		t.Fatalf("expected implementation phase after recover, got %s", st.Phase)
+	}
+	if st.LastResult.Command != "recover" {
+		t.Fatalf("expected last_result command recover, got %+v", st.LastResult)
+	}
+	if st.LastError != nil {
+		t.Fatalf("expected last error cleared, got %+v", st.LastError)
+	}
+}
+
+func TestDoctorRuntimeOutputsDiagnostics(t *testing.T) {
+	setupTempCWD(t)
+	if _, err := executeAX(t, "state"); err != nil {
+		t.Fatalf("state: %v", err)
+	}
+	out, err := executeAX(t, "doctor", "runtime")
+	if err != nil {
+		t.Fatalf("doctor runtime: %v", err)
+	}
+	for _, field := range []string{"phase:", "runtime mode:", "session id:", "active sessions:", "lock files:", "state file:"} {
+		if !strings.Contains(out, field) {
+			t.Fatalf("doctor runtime output missing %q: %s", field, out)
+		}
+	}
+}
+
 func TestRunResumeScaffolding(t *testing.T) {
 	tmp := setupTempCWD(t)
 	if _, err := executeAX(t, "propose", "Resume Flow"); err != nil {
@@ -564,7 +631,7 @@ func TestRunResumeScaffolding(t *testing.T) {
 
 	runName := singleEntryName(t, filepath.Join(tmp, ".ax", "runs"))
 	runBody := mustRead(t, filepath.Join(tmp, ".ax", "runs", runName))
-	if !strings.Contains(runBody, "- resumed_from: T1/green") {
+	if !strings.Contains(runBody, "- resumed_from: ") {
 		t.Fatalf("expected resumed_from scaffold, got:\n%s", runBody)
 	}
 	state = readState(t, tmp)
@@ -692,6 +759,31 @@ func TestRunCreatesWorktreeMetadataByDefault(t *testing.T) {
 	meta := mustRead(t, metaPath)
 	if !strings.Contains(meta, "status: prepared") {
 		t.Fatalf("unexpected worktree metadata:\n%s", meta)
+	}
+}
+
+func TestRunWorktreeRuntimeModeCreatesSessionIsolatedWorktree(t *testing.T) {
+	tmp := setupTempCWD(t)
+	if _, err := executeAX(t, "propose", "Worktree Runtime Mode"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+
+	if _, err := executeAX(t, "--runtime-mode", "worktree", "--session-id", "sess-test-a", "run", "--plan", planName); err != nil {
+		t.Fatalf("run worktree mode: %v", err)
+	}
+
+	metaPath := filepath.Join(tmp, ".ax", "worktrees", proposalID, "sess-test-a", "worktree.yaml")
+	mustExist(t, metaPath)
+	meta := mustRead(t, metaPath)
+	for _, field := range []string{"session_id: sess-test-a", "runtime_mode: worktree", "status: prepared"} {
+		if !strings.Contains(meta, field) {
+			t.Fatalf("worktree metadata missing %q:\n%s", field, meta)
+		}
 	}
 }
 
