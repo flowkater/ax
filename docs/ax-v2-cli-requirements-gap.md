@@ -222,6 +222,9 @@ ax v2 CLI는 다음을 만족해야 한다.
 - 단계별(Phase) 체크리스트
 - 예상 소요 시간
 
+참조 확장 문서:
+- `docs/ax-v2-hardening-and-tui-requirements.md` (하드닝 + TUI 요구사항)
+
 ---
 
 ## 10) Opus 병렬 리뷰 반영 (필수 추가 요구사항)
