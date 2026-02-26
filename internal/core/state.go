@@ -200,8 +200,38 @@ func (s *State) normalize() {
 	if s.Runtime.Mode == "" {
 		s.Runtime.Mode = RuntimeModeSingle
 	}
+	if s.Runtime.ClusterID == "" {
+		s.Runtime.ClusterID = ResolveRuntimeClusterID("")
+	}
+	if s.Runtime.NodeID == "" {
+		s.Runtime.NodeID = ResolveRuntimeNodeID("")
+	}
+	if s.Runtime.SessionJournal == "" {
+		s.Runtime.SessionJournal = filepath.ToSlash(filepath.Join(".ax", "logs", "runtime-journal.jsonl"))
+	}
 	if s.Runtime.ActiveSessions == nil {
 		s.Runtime.ActiveSessions = map[string]string{}
+	}
+	if s.Runtime.SessionMeta == nil {
+		s.Runtime.SessionMeta = map[string]RuntimeSessionRef{}
+	}
+	if len(s.Runtime.ActiveSessions) > 0 {
+		now := time.Now().Format(time.RFC3339)
+		for sessionID, command := range s.Runtime.ActiveSessions {
+			if _, exists := s.Runtime.SessionMeta[sessionID]; exists {
+				continue
+			}
+			s.Runtime.SessionMeta[sessionID] = RuntimeSessionRef{
+				SessionID: sessionID,
+				Command:   command,
+				Mode:      s.Runtime.Mode,
+				ClusterID: s.Runtime.ClusterID,
+				NodeID:    s.Runtime.NodeID,
+				StartedAt: now,
+				UpdatedAt: now,
+				Status:    "active",
+			}
+		}
 	}
 	if s.ContextChain == nil {
 		s.ContextChain = []string{}

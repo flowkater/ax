@@ -13,6 +13,12 @@ func TestRootRegistersCommands(t *testing.T) {
 	if f := root.PersistentFlags().Lookup("session-id"); f == nil {
 		t.Fatal("expected session-id persistent flag")
 	}
+	if f := root.PersistentFlags().Lookup("cluster-id"); f == nil {
+		t.Fatal("expected cluster-id persistent flag")
+	}
+	if f := root.PersistentFlags().Lookup("node-id"); f == nil {
+		t.Fatal("expected node-id persistent flag")
+	}
 
 	want := []string{"propose", "plan", "run", "verify", "archive", "discover", "quick", "state", "recover", "doctor", "review", "compound"}
 	for _, name := range want {

@@ -104,6 +104,7 @@
 - [x] app-server RPC lifecycle 메서드(`Resume/Fork/Rollback/Steer/Interrupt`) 확장 구현
 - [x] streaming 수신/완료 집계 + retry/backoff 구현
 - [x] compaction trigger 구현
+- [x] runtime hardening 최종 보강(cluster/node/session metadata, shared/worktree session-isolated worktree, runtime journal + checkpoint/resume 복구)
 
 ### Phase 5: Delivery Surface <!-- T4:auto -->
 - [x] CLI 명령별 사용자 메시지/에러 분류 출력 통일
@@ -146,6 +147,12 @@
 | 2026-02-26 | Worker-3 Review | T2~T3 | Tier gate/approval/verify-diff/compound/compaction/worktree deterministic 보강 + 재검증 | `go test ./...` PASS, `go build ./...` PASS, CLI E2E PASS |
 | 2026-02-26 | Worker-2 Final Revalidation | T2~T3 | approval/verify-diff/compound/compaction/worktree/no-side-effect 및 회귀 최종 정리 | `go test ./...` PASS, `go build ./...` PASS, CLI E2E PASS |
 | 2026-02-26 | Worker-1 Final Verification | T2~T3 | tier gate/approval/verify-diff/compound/compaction/worktree determinism/no-side-effect 재확인 | `go test ./...` PASS, `go build ./...` PASS, CLI E2E PASS |
+| 2026-02-26 | Worker-2 Runtime Hardening Final | T3 | runtime metadata/journal/checkpoint + shared concurrency semantics + load/kill 안정성 재검증 | `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, real binary soak/load/kill PASS (`/var/folders/h8/941vlqss6tqd_mfy7g77n98h0000gn/T/ax-worker2-final-pwy0h6i0/summary.json`) |
+| 2026-02-26 | Worker-3 Runtime Hardening Final | T2~T3 | runtime metadata(cluster/node/session), runtime checkpoint 복구, shared session worktree 격리, recover auto/resume 정책 보강 | `go test ./...` PASS, `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, real binary soak/load/kill PASS (`/tmp/ax-worker3-evidence-20260226-210011/runtime-summary.json`) |
+| 2026-02-26 | Worker-1 Runtime Hardening Revalidation | T2~T3 | cluster/node/session metadata 플래그·환경변수 반영, shared/worktree 세션 격리, checkpoint 복구 보강, journal/doctor 진단 정합성 재검증 | `go test ./...` PASS, `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, real binary soak/load/kill PASS (`/tmp/ax-prod-soak-20260226-120148/summary.json`) |
+| 2026-02-26 | Worker-1 Runtime/Recover/Doctor Smoke Refresh | T2~T3 | 실제 `ax` 바이너리로 runtime-mode(shared)/doctor runtime JSON/recover auto/runs→archive 재검증 | `go test ./...` PASS, `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, smoke `state→propose→plan→run --tdd --loop→doctor runtime --json→recover --strategy auto→discover --party→review→compound --audit→verify→archive→state --json` PASS (`/tmp/ax-worker1-revalidation-20260226-121531-GiZxMm/runtime-smoke-summary.json`) |
+| 2026-02-26 | Worker-3 Final Runtime Gate | T2~T4 | 최종 게이트(go/race/vet/build + smoke/recover/doctor/runtime-mode) 실바이너리 재검증 | `go test ./...` PASS, `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, shared/worktree runtime-mode + recover auto(rerun/resume) + doctor runtime JSON + E2E smoke PASS (`/tmp/ax-worker3-final-20260226-211549/runtime-smoke-summary.json`) |
+| 2026-02-26 | Leader Final Production Gate | T2~T4 | 최신 코드 기준 final gate 재실행(quality + full runtime smoke + soak/load/kill) | `go test -count=1 ./...` PASS, `go test -count=1 -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, full smoke PASS (`/tmp/ax-live-verify-debug3-iYIOCG/live-runtime-summary.json`), soak/load/kill PASS (`/tmp/ax-live-soak-final-CVRKO7/summary.json`) |
 
 ---
 
@@ -157,6 +164,7 @@
   - [x] Policy/Decision Lock 5항목과 충돌 항목 없음 확인
   - [x] 2/3(Test Matrix), 3/3(Execution) 문서로 넘길 Tier 게이트 기준 고정
   - [x] 구현 실행 증거(테스트/빌드/E2E 로그) 주입
+  - [x] runtime hardening 실증 근거(soak/load/kill + race/vet/build + runtime-mode/recover/doctor smoke) 최신화 (`/tmp/ax-worker3-final-20260226-211549/runtime-smoke-summary.json`)
 
 ---
 
@@ -182,7 +190,7 @@
 ## 결론
 - 1/3 Master Plan은 gap 문서 기준 필수 요구사항과 Tier(T1~T4) 책임을 재정렬했다.
 - 기존 누락(전이 메타필드, 3-Layer Context, T0~T2 명시, Osmani/gotcha schema, lifecycle 5메서드)을 체크리스트에 반영했다.
-- 증거 주입은 완료했으며, 잔여 작업은 미구현 체크박스(예: tier progression gate, reject/steer, worktree, compaction, compound 실구현) 해소다.
+- 증거 주입은 완료되었고, 본 문서 범위 기준 미해결 체크박스/잔여 런타임 갭은 없다.
 
 ---
 

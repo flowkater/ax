@@ -2,6 +2,7 @@ package ax
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -482,6 +483,237 @@ func TestSharedRuntimeModeAllowsProposeAfterPlanning(t *testing.T) {
 	}
 }
 
+func TestRuntimeMetadataPersistsFromFlagsAndDoctorRuntimeJSON(t *testing.T) {
+	tmp := setupTempCWD(t)
+
+	if _, err := executeAX(t, "--runtime-mode", "shared", "--session-id", "sess-meta-1", "--cluster-id", "cluster-a", "--node-id", "node-a", "propose", "Runtime Metadata"); err != nil {
+		t.Fatalf("propose with runtime metadata: %v", err)
+	}
+
+	st := readState(t, tmp)
+	if st.Runtime.Mode != core.RuntimeModeShared {
+		t.Fatalf("expected runtime mode shared, got %s", st.Runtime.Mode)
+	}
+	if st.Runtime.SessionID != "sess-meta-1" {
+		t.Fatalf("expected session-id sess-meta-1, got %s", st.Runtime.SessionID)
+	}
+	if st.Runtime.ClusterID != "cluster-a" {
+		t.Fatalf("expected cluster-id cluster-a, got %s", st.Runtime.ClusterID)
+	}
+	if st.Runtime.NodeID != "node-a" {
+		t.Fatalf("expected node-id node-a, got %s", st.Runtime.NodeID)
+	}
+
+	out, err := executeAX(t, "doctor", "runtime", "--json")
+	if err != nil {
+		t.Fatalf("doctor runtime json: %v", err)
+	}
+	payload := map[string]any{}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("unmarshal doctor runtime json: %v\nout=%s", err, out)
+	}
+	if got := fmt.Sprint(payload["cluster_id"]); got != "cluster-a" {
+		t.Fatalf("expected doctor cluster_id=cluster-a, got %s", got)
+	}
+	if got := fmt.Sprint(payload["node_id"]); got != "node-a" {
+		t.Fatalf("expected doctor node_id=node-a, got %s", got)
+	}
+	if got := fmt.Sprint(payload["journal_path"]); got == "" || got == "<nil>" {
+		t.Fatalf("expected doctor journal_path to be populated, got %q", got)
+	}
+}
+
+func TestRunSharedRuntimeModeCreatesSessionIsolatedWorktree(t *testing.T) {
+	tmp := setupTempCWD(t)
+	if _, err := executeAX(t, "--runtime-mode", "shared", "--session-id", "sess-shared-a", "propose", "Shared Worktree Runtime"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "--runtime-mode", "shared", "--session-id", "sess-shared-a", "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+
+	if _, err := executeAX(t, "--runtime-mode", "shared", "--session-id", "sess-shared-a", "run", "--plan", planName); err != nil {
+		t.Fatalf("run shared: %v", err)
+	}
+
+	metaPath := filepath.Join(tmp, ".ax", "worktrees", proposalID, "sess-shared-a", "worktree.yaml")
+	mustExist(t, metaPath)
+	meta := mustRead(t, metaPath)
+	for _, field := range []string{"session_id: sess-shared-a", "runtime_mode: shared", "status: prepared"} {
+		if !strings.Contains(meta, field) {
+			t.Fatalf("shared runtime worktree metadata missing %q:\n%s", field, meta)
+		}
+	}
+}
+
+func TestRecoverResumeRestoresTDDSnapshotFromCheckpoint(t *testing.T) {
+	tmp := setupTempCWD(t)
+	const sessionID = "sess-recover-checkpoint"
+
+	if _, err := executeAX(t, "--session-id", sessionID, "propose", "Recover Checkpoint"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "--session-id", sessionID, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+
+	if _, err := executeAX(t, "--session-id", sessionID, "run", "--plan", planName, "--tdd"); err != nil {
+		t.Fatalf("run --tdd: %v", err)
+	}
+
+	checkpointPath := filepath.Join(tmp, ".ax", "runtime", "checkpoints", sessionID+".json")
+	mustExist(t, checkpointPath)
+	checkpoint := map[string]any{
+		"session_id": sessionID,
+		"status":     "in_progress",
+		"tdd": map[string]any{
+			"enabled":         true,
+			"current_tier":    "T1",
+			"current_step":    "green",
+			"completed_steps": 6,
+			"total_steps":     9,
+			"depth":           "normal",
+			"depth_source":    "auto",
+			"approval_policy": "never",
+		},
+	}
+	body, err := json.MarshalIndent(checkpoint, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal checkpoint: %v", err)
+	}
+	if err := os.WriteFile(checkpointPath, append(body, '\n'), 0o644); err != nil {
+		t.Fatalf("write checkpoint: %v", err)
+	}
+
+	st := readState(t, tmp)
+	st.TDD = core.TDDState{}
+	if err := core.SaveState(tmp, st); err != nil {
+		t.Fatalf("save cleared state: %v", err)
+	}
+
+	if _, err := executeAX(t, "--session-id", sessionID, "recover", "--strategy", "resume"); err != nil {
+		t.Fatalf("recover --strategy resume: %v", err)
+	}
+
+	st = readState(t, tmp)
+	if !st.TDD.Enabled {
+		t.Fatalf("expected tdd to be restored from checkpoint, got %+v", st.TDD)
+	}
+	if st.TDD.CurrentTier != "T1" || st.TDD.CompletedSteps != 6 {
+		t.Fatalf("unexpected restored tdd state: %+v", st.TDD)
+	}
+}
+
+func TestRuntimeModeUsesAXRuntimeModeWhenFlagUnset(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_RUNTIME_MODE", "shared")
+
+	if _, err := executeAX(t, "propose", "Env Runtime Mode"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+
+	st := readState(t, tmp)
+	if st.Runtime.Mode != core.RuntimeModeShared {
+		t.Fatalf("expected runtime mode shared from AX_RUNTIME_MODE, got %s", st.Runtime.Mode)
+	}
+}
+
+func TestRuntimeSessionMetadataTracksClusterNodeAndCommands(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_CLUSTER_ID", "cluster-e2e")
+	t.Setenv("AX_NODE_ID", "node-e2e")
+	const sessionID = "sess-meta-001"
+
+	if _, err := executeAX(t, "--runtime-mode", "shared", "--session-id", sessionID, "propose", "Runtime Meta"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "--runtime-mode", "shared", "--session-id", sessionID, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+
+	st := readState(t, tmp)
+	if st.Runtime.ClusterID != "cluster-e2e" {
+		t.Fatalf("expected cluster id cluster-e2e, got %q", st.Runtime.ClusterID)
+	}
+	if st.Runtime.NodeID != "node-e2e" {
+		t.Fatalf("expected node id node-e2e, got %q", st.Runtime.NodeID)
+	}
+
+	meta, ok := st.Runtime.SessionMeta[sessionID]
+	if !ok {
+		t.Fatalf("expected runtime session metadata for %s", sessionID)
+	}
+	if meta.Command != "plan" {
+		t.Fatalf("expected command plan, got %q", meta.Command)
+	}
+	if meta.Mode != core.RuntimeModeShared {
+		t.Fatalf("expected mode shared, got %q", meta.Mode)
+	}
+	if meta.ClusterID != "cluster-e2e" {
+		t.Fatalf("expected metadata cluster id cluster-e2e, got %q", meta.ClusterID)
+	}
+	if meta.NodeID != "node-e2e" {
+		t.Fatalf("expected metadata node id node-e2e, got %q", meta.NodeID)
+	}
+	if meta.Status != "active" {
+		t.Fatalf("expected metadata status active, got %q", meta.Status)
+	}
+	if meta.StartedAt == "" || meta.UpdatedAt == "" {
+		t.Fatalf("expected metadata timestamps to be set, got %+v", meta)
+	}
+}
+
+func TestRunPersistsRuntimeSessionMetadataAndJournal(t *testing.T) {
+	tmp := setupTempCWD(t)
+	if _, err := executeAX(t, "--runtime-mode", "shared", "--session-id", "sess-meta", "propose", "Runtime Metadata"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "--runtime-mode", "shared", "--session-id", "sess-meta", "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "--runtime-mode", "shared", "--session-id", "sess-meta", "run", "--plan", planName, "--tdd"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	st := readState(t, tmp)
+	if st.Runtime.ClusterID == "" {
+		t.Fatal("expected cluster_id in runtime state")
+	}
+	if st.Runtime.NodeID == "" {
+		t.Fatal("expected node_id in runtime state")
+	}
+	if st.Runtime.SessionJournal != filepath.ToSlash(filepath.Join(".ax", "logs", "runtime-journal.jsonl")) {
+		t.Fatalf("unexpected runtime journal path: %s", st.Runtime.SessionJournal)
+	}
+	meta, ok := st.Runtime.SessionMeta["sess-meta"]
+	if !ok {
+		t.Fatalf("expected runtime session metadata for sess-meta, got %+v", st.Runtime.SessionMeta)
+	}
+	if meta.Command != "run" {
+		t.Fatalf("expected command=run in session metadata, got %+v", meta)
+	}
+	if meta.Mode != core.RuntimeModeShared {
+		t.Fatalf("expected shared mode in session metadata, got %+v", meta)
+	}
+	if meta.Status != "active" {
+		t.Fatalf("expected active status in session metadata, got %+v", meta)
+	}
+
+	journal := mustRead(t, filepath.Join(tmp, ".ax", "logs", "runtime-journal.jsonl"))
+	for _, want := range []string{`"command":"run"`, `"session_id":"sess-meta"`, `"stage":"start"`, `"stage":"checkpoint"`, `"stage":"completed"`} {
+		if !strings.Contains(journal, want) {
+			t.Fatalf("runtime journal missing %q:\n%s", want, journal)
+		}
+	}
+}
+
 func TestQuickEscalatesWhenThresholdExceeded(t *testing.T) {
 	tmp := setupTempCWD(t)
 
@@ -585,6 +817,83 @@ func TestRecoverCommandUpdatesState(t *testing.T) {
 	}
 	if st.LastError != nil {
 		t.Fatalf("expected last error cleared, got %+v", st.LastError)
+	}
+}
+
+func TestRecoverAutoSelectsResumeWhenInterrupted(t *testing.T) {
+	tmp := setupTempCWD(t)
+	if _, err := executeAX(t, "propose", "Recover Auto Resume"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "run", "--plan", planName, "--tdd"); err != nil {
+		t.Fatalf("run --tdd: %v", err)
+	}
+
+	st := readState(t, tmp)
+	st.Run.LastFailedStep = "run:in-progress"
+	st.Run.LastFailureCause = "interrupted-or-crash"
+	if err := core.SaveState(tmp, st); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	out, err := executeAX(t, "recover", "--strategy", "auto")
+	if err != nil {
+		t.Fatalf("recover auto: %v", err)
+	}
+	if !strings.Contains(out, "strategy=resume") {
+		t.Fatalf("expected auto recover to choose resume, got: %s", out)
+	}
+}
+
+func TestRecoverAutoFallsBackToRerunWithoutResumeState(t *testing.T) {
+	setupTempCWD(t)
+
+	out, err := executeAX(t, "recover", "--strategy", "auto")
+	if err != nil {
+		t.Fatalf("recover auto: %v", err)
+	}
+	if !strings.Contains(out, "strategy=rerun") {
+		t.Fatalf("expected auto recover to choose rerun, got: %s", out)
+	}
+}
+
+func TestRecoverAutoResolvesToRerunWhenJournalShowsInterruptedRun(t *testing.T) {
+	tmp := setupTempCWD(t)
+	if _, err := executeAX(t, "--runtime-mode", "shared", "--session-id", "sess-recover", "propose", "Recover Journal"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "--runtime-mode", "shared", "--session-id", "sess-recover", "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	st := readState(t, tmp)
+	st.TDD = core.TDDState{}
+	st.Run.LastFailedStep = ""
+	st.Run.LastFailureCause = ""
+	if err := core.SaveState(tmp, st); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	journalPath := filepath.Join(tmp, ".ax", "logs", "runtime-journal.jsonl")
+	entry := `{"time":"2026-02-26T11:00:00Z","session_id":"sess-recover","command":"run","stage":"checkpoint","mode":"shared","phase":"implementation"}` + "\n"
+	if err := os.WriteFile(journalPath, []byte(entry), 0o644); err != nil {
+		t.Fatalf("write journal: %v", err)
+	}
+
+	out, err := executeAX(t, "--runtime-mode", "shared", "--session-id", "sess-recover", "recover", "--strategy", "auto")
+	if err != nil {
+		t.Fatalf("recover auto: %v", err)
+	}
+	if !strings.Contains(out, "strategy=rerun") {
+		t.Fatalf("expected auto strategy to resolve to rerun, got: %s", out)
+	}
+	st = readState(t, tmp)
+	if st.LastResult.Command != "recover" || st.LastResult.Status != "rerun" {
+		t.Fatalf("expected recover rerun last result, got %+v", st.LastResult)
 	}
 }
 

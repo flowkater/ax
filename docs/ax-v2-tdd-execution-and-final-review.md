@@ -45,10 +45,13 @@ Master Plan(1/3)과 Test Matrix(2/3)를 실제 구현 순서로 실행하기 위
 - [x] compound triage(FixCandidate/Document/Noise) + Osmani filter + gotcha schema/decay/audit 검증
 - [x] Batch C(T3), Batch D(T4) 테스트 통과
 - [x] RT-08 통과(§4.9 누락 보정)
+- [x] runtime hardening 최종 통합(cluster/node/session metadata, shared/worktree session isolation, runtime journal/checkpoint + recover resume) + 실부하 검증 통과
 
 ### Stage 4 — Final E2E
 - [x] propose→plan→run→verify→archive 1회 성공
 - [x] `go test ./...` + `go build ./...` 통과
+- [x] `go test -race ./...` + `go vet ./...` 통과
+- [x] 실제 바이너리 runtime-mode(shared/worktree) + recover/doctor smoke 통과
 - [x] 릴리즈 후보 산출물 고정
 - [x] 1/3~3/3 문서 Gap 1:1 alignment 결과 첨부
 
@@ -117,6 +120,12 @@ Master Plan(1/3)과 Test Matrix(2/3)를 실제 구현 순서로 실행하기 위
 | 2026-02-26 | Worker-3 Revalidation | Conditional Go (보강 구현) | `go test ./...` PASS, `go build ./...` PASS, CLI E2E PASS, tier gate/approval/verify-diff/compound/compaction/worktree deterministic 보강 |
 | 2026-02-26 | Worker-2 Final Revalidation | Go (잔여 갭 해소) | `go test ./...` PASS, `go build ./...` PASS, CLI E2E PASS, verify diff/approval policy/compound triage/compaction/worktree no-side-effect 최종 검증 |
 | 2026-02-26 | Worker-1 Final Verification | Go (재검증) | `go test ./...` PASS, `go build ./...` PASS, CLI E2E PASS, tier gate/approval/verify diff/compound/compaction/worktree deterministic/no-side-effect 재확인 |
+| 2026-02-26 | Worker-2 Runtime Hardening Final | Go (production readiness) | `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, real binary soak/load/kill PASS (`/var/folders/h8/941vlqss6tqd_mfy7g77n98h0000gn/T/ax-worker2-final-pwy0h6i0/summary.json`) |
+| 2026-02-26 | Worker-3 Runtime Hardening Final | Go (runtime gaps closed) | `go test ./...` PASS, `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, real binary soak/load/kill PASS (`/tmp/ax-worker3-evidence-20260226-210011/runtime-summary.json`) |
+| 2026-02-26 | Worker-1 Runtime Hardening Revalidation | Go (production-ready) | `go test ./...` PASS, `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, real binary soak/load/kill PASS (`/tmp/ax-prod-soak-20260226-120148/summary.json`) |
+| 2026-02-26 | Worker-1 Runtime/Recover/Doctor Smoke Refresh | Go (runtime contract reconfirmed) | `go test ./...` PASS, `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, real binary runtime-mode(shared)+doctor runtime JSON+recover auto 포함 smoke 시나리오 PASS (`/tmp/ax-worker1-revalidation-20260226-121531-GiZxMm/runtime-smoke-summary.json`) |
+| 2026-02-26 | Worker-3 Final Runtime Gate | Go (final release gate revalidated) | `go test ./...` PASS, `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, real binary runtime-mode(shared/worktree) + recover auto(rerun/resume) + doctor runtime JSON + E2E smoke PASS (`/tmp/ax-worker3-final-20260226-211549/runtime-smoke-summary.json`) |
+| 2026-02-26 | Leader Final Production Gate | Go (final confirmation) | `go test -count=1 ./...` PASS, `go test -count=1 -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, full runtime smoke PASS (`/tmp/ax-live-verify-debug3-iYIOCG/live-runtime-summary.json`), soak/load/kill PASS (`/tmp/ax-live-soak-final-CVRKO7/summary.json`) |
 
 ---
 
@@ -128,6 +137,7 @@ Master Plan(1/3)과 Test Matrix(2/3)를 실제 구현 순서로 실행하기 위
   - [x] Decision Lock 5항목 값 일치 확인
   - [x] T1~T4 checklist ↔ AT 매핑/근거 섹션 정리
   - [x] 구현 실행 증거(테스트 로그/빌드 로그/E2E) 주입
+  - [x] runtime hardening 운영 검증 증거(soak/load/kill + race/vet/build + runtime-mode/recover/doctor smoke) 최신 반영 (`/tmp/ax-worker3-final-20260226-211549/runtime-smoke-summary.json`)
 
 ---
 
@@ -147,7 +157,7 @@ Master Plan(1/3)과 Test Matrix(2/3)를 실제 구현 순서로 실행하기 위
 ## 결론
 - 3/3 실행 문서는 gap 기준을 Stage 게이트/Go-No-Go 규칙으로 재정렬해 1:1 검증 흐름을 고정했다.
 - 누락됐던 항목(§4 Must 항목, 전이 메타필드, 3-Layer Context, lifecycle 5메서드, compound 세부 규칙, tdd-go 프로파일)을 RT+AT 게이트로 반영했다.
-- 실증 로그(테스트/빌드/E2E)는 재검증 완료되었고, 본 gap-closing 범위의 Stage 2/3 필수 체크박스는 모두 해소되었다.
+- 실증 로그(테스트/빌드/E2E/real soak-load-kill)는 재검증 완료되었고, 본 gap-closing 범위의 Stage 2/3 필수 체크박스 및 runtime hardening 리스크는 모두 해소되었다.
 
 ---
 

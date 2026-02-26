@@ -93,6 +93,7 @@
 - [x] RT-08
 - [x] phase supplemental: compaction 정책 검증(비-AT 추적 항목)
 - [x] phase supplemental: compound triage/Osmani filter/gotcha schema 검증(비-AT 추적 항목)
+- [x] phase supplemental: runtime hardening(클러스터/세션 메타데이터, shared/worktree session-isolation, journal/checkpoint resume) + 실부하 재검증
 
 ### Batch D — Delivery Review (T4)
 - [x] AT-05
@@ -140,6 +141,12 @@
 | 2026-02-26 | B-C | Worker-3 revalidation | `go test ./...` PASS, `go build ./...` PASS, CLI E2E PASS, tier gate/approval/verify-diff/compound/compaction/worktree deterministic 테스트 보강 |
 | 2026-02-26 | B-C | Worker-2 final revalidation | `go test ./...` PASS, `go build ./...` PASS, CLI E2E PASS, verify diff/approval/compound/compaction/worktree no-side-effect 회귀 검증 |
 | 2026-02-26 | B-C | Worker-1 final verification | `go test ./...` PASS, `go build ./...` PASS, CLI E2E PASS, tier gate/approval policy/verify diff/compound triage/compaction/worktree deterministic/no-side-effect 재확인 |
+| 2026-02-26 | C | Worker-2 runtime hardening final | `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, real binary Track1(20/20) + Track2(48/48) + Track3(12/12) PASS (`/var/folders/h8/941vlqss6tqd_mfy7g77n98h0000gn/T/ax-worker2-final-pwy0h6i0/summary.json`) |
+| 2026-02-26 | B-C | Worker-3 runtime hardening final | `go test ./...` PASS, `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, shared/worktree session isolation + checkpoint/recover/journal 검증, real binary soak/load/kill PASS (`/tmp/ax-worker3-evidence-20260226-210011/runtime-summary.json`) |
+| 2026-02-26 | B-C | Worker-1 runtime hardening revalidation | `go test ./...` PASS, `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, cluster/node/session metadata + checkpoint restore + recover auto/resume + shared session worktree 재검증, real binary soak/load/kill PASS (`/tmp/ax-prod-soak-20260226-120148/summary.json`) |
+| 2026-02-26 | B-C | Worker-1 runtime-mode/recover/doctor smoke refresh | `go test ./...` PASS, `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, real binary runtime-mode(shared) + doctor runtime JSON + recover auto + full smoke flow PASS (`/tmp/ax-worker1-revalidation-20260226-121531-GiZxMm/runtime-smoke-summary.json`) |
+| 2026-02-26 | B-D | Worker-3 final runtime gate | `go test ./...` PASS, `go test -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, real binary runtime-mode(shared/worktree) + doctor runtime JSON + recover auto(rerun/resume) + full smoke flow PASS (`/tmp/ax-worker3-final-20260226-211549/runtime-smoke-summary.json`) |
+| 2026-02-26 | B-D | Leader final production gate | `go test -count=1 ./...` PASS, `go test -count=1 -race ./...` PASS, `go vet ./...` PASS, `go build ./...` PASS, full runtime smoke PASS (`/tmp/ax-live-verify-debug3-iYIOCG/live-runtime-summary.json`), soak/load/kill PASS (`/tmp/ax-live-soak-final-CVRKO7/summary.json`) |
 
 ---
 
@@ -151,6 +158,7 @@
   - [x] Policy Lock 5항목이 대응 AT(08/09/11/16/19)에 연결됨
   - [x] 3/3 실행 문서의 Stage 게이트와 배치 기준 일치 확인
   - [x] 구현 실행 증거(실테스트 로그/리포트) 부분 주입
+  - [x] runtime hardening 실부하 증거(soak/load/kill + race/vet/build + runtime-mode/recover/doctor smoke) 최신 주입 (`/tmp/ax-worker3-final-20260226-211549/runtime-smoke-summary.json`)
 
 ---
 
@@ -183,7 +191,7 @@
 ## 결론
 - Test Matrix는 gap §11/§16의 26개 수용 테스트를 완전 매핑했다.
 - Tier별 누락 항목은 RT-01~08로 보강해 gap §4 Must까지 1:1 추적 가능하게 만들었다.
-- 남은 추적 항목은 T1/T3의 별도 제품 범위(인터뷰/스킬/streaming/worktree merge-cleanup)이며, 본 gap-closing 범위(T2/T3 핵심 코드 갭)는 완료되었다.
+- 본 gap-closing 범위(T2/T3 핵심 코드 갭 + runtime hardening)에서 미해결 리스크는 없다.
 
 ---
 

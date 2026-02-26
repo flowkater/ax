@@ -613,3 +613,70 @@ ax는 외부 의존 없이 아래 스킬을 자체 내장해야 한다.
 - `docs/ax-v2-tdd-execution-and-final-review.md`
 
 위 3개 실행 문서와 본 gap 문서의 Must 요구사항을 대조한 결과, 현재 코드/테스트/실행 결과는 gap 기준과 정합함.
+
+---
+
+## 20) Worker-1 Runtime/Recover/Doctor 재검증 (2026-02-26)
+
+### 20.1 재검증 범위
+- 실제 `ax` 바이너리 기반 smoke: `state→propose→plan→run --tdd --loop→doctor runtime --json→recover --strategy auto→discover --party→review→compound --audit→verify→archive→state --json`
+- runtime metadata(contract): `runtime_mode/shared`, `session_id`, `cluster_id`, `node_id`, `journal_path`
+- recover 자동 전략 contract: `recover: strategy=rerun ...` 출력 및 상태 유지
+- archive 이후 worktree snapshot/runtime checkpoint/runtime journal artifact 존재 확인
+
+### 20.2 실행 증거
+- `go test ./...` **PASS**
+- `go test -race ./...` **PASS**
+- `go vet ./...` **PASS**
+- `go build ./...` **PASS**
+- real binary smoke + runtime/doctor/recover contract **PASS**
+  - summary: `/tmp/ax-worker1-revalidation-20260226-121531-GiZxMm/runtime-smoke-summary.json`
+
+### 20.3 정합성 결론 보강
+- gap §10.1(상태/메타필드), §10.6(운영 복구성), §10.7(streaming/recovery), §14(runtime 운영 시나리오) 기준을 실바이너리 smoke로 재확인했다.
+- 본 문서의 Must 범위 기준으로 신규 미해결 갭은 없다.
+
+---
+
+## 21) Worker-3 Final Runtime Gate 재검증 (2026-02-26)
+
+### 21.1 재검증 범위
+- 필수 품질 게이트: `go test ./...`, `go test -race ./...`, `go vet ./...`, `go build ./...`
+- 실제 `ax` 바이너리 smoke: `propose→plan→run --tdd→recover --strategy auto→verify→archive`
+- recover contract: auto 전략 `rerun`/`resume` 경로 각각 실증
+- doctor/runtime-mode contract: `doctor runtime --json` 기준 shared/worktree 모드 및 metadata 검증
+- worktree session-isolated metadata (`.ax/worktrees/<proposal>/<session>/worktree.yaml`) 검증
+
+### 21.2 실행 증거
+- 실행 증거 루트: `/tmp/ax-worker3-final-20260226-211549`
+- 종합 summary: `/tmp/ax-worker3-final-20260226-211549/runtime-smoke-summary.json`
+- 품질 게이트: 전부 **PASS**
+- smoke/recover/doctor/runtime-mode assertions: 전부 **PASS**
+
+### 21.3 정합성 결론
+- gap §5(품질/운영), §10.1/§10.6/§10.7, §14.1/§14.2 요구사항에 대한 실바이너리 기반 최종 게이트를 통과했다.
+- 현재 기준으로 본 문서 Must 항목의 미해결 갭은 없다.
+
+---
+
+## 22) Leader Final Runtime/Soak/Load/Kill 재검증 (2026-02-26)
+
+### 22.1 실행 범위
+- 필수 품질 게이트 재실행: `go test -count=1 ./...`, `go test -count=1 -race ./...`, `go vet ./...`, `go build ./...`
+- 실제 `ax` 바이너리 full smoke:
+  - `state→propose(shared)→plan(shared)→run --tdd --loop(shared)→doctor runtime --json→recover --strategy auto(shared)→discover runtime --party→review --proposal→compound --audit→verify --proposal→archive --proposal→state --json`
+- 장시간 시나리오 재검증:
+  - Track-1 sequential soak
+  - Track-2 shared parallel load
+  - Track-3 SIGKILL + recover auto
+
+### 22.2 실행 증거
+- full smoke summary: `/tmp/ax-live-verify-debug3-iYIOCG/live-runtime-summary.json`
+- soak/load/kill summary: `/tmp/ax-live-soak-final-CVRKO7/summary.json`
+  - Track-1: **10/10 success**
+  - Track-2: **16/16 success**
+  - Track-3: **SIGKILL 6/6, recover_ok 6/6**
+
+### 22.3 최종 결론
+- gap 문서 Must 요구사항(특히 runtime metadata/doctor/recover, shared concurrency, crash-kill 복구, 품질 게이트)은 최신 실바이너리 기준으로 재검증 완료.
+- 본 gap 문서 기준의 미해결 갭은 현재 없다.

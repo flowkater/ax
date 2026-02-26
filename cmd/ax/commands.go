@@ -48,6 +48,8 @@ type stepTurnMapping struct {
 type runtimeContext struct {
 	mode      core.RuntimeMode
 	sessionID string
+	clusterID string
+	nodeID    string
 }
 
 func newProposeCmd() *cobra.Command {
@@ -402,28 +404,80 @@ func newRecoverCmd() *cobra.Command {
 					return err
 				}
 				applyRuntimeState(st, rt, "recover")
-				mode := strings.TrimSpace(strings.ToLower(strategy))
-				switch mode {
+				requestedMode := strings.TrimSpace(strings.ToLower(strategy))
+				switch requestedMode {
 				case "", "auto":
-					mode = "auto"
+					requestedMode = "auto"
 				case "resume", "rerun":
 				default:
 					return fmt.Errorf("invalid recover strategy %q (use auto|resume|rerun)", strategy)
 				}
-				if mode == "resume" && !st.TDD.Enabled {
-					return errors.New("recover resume unavailable: no persisted tdd state")
+
+				resolvedMode := requestedMode
+				if requestedMode == "auto" {
+					resolvedMode = "rerun"
+					explicitResumeCandidate := strings.TrimSpace(st.Run.LastFailedStep) != "" || strings.TrimSpace(st.Run.LastFailureCause) != ""
+					if explicitResumeCandidate {
+						resolvedMode = "resume"
+					} else {
+						lastRunEntry, ok, journalErr := latestRuntimeJournalEntry(wd, st.Runtime.SessionID, "run")
+						if journalErr != nil {
+							return journalErr
+						}
+						if ok {
+							switch lastRunEntry.Stage {
+							case "start", "checkpoint", "failed":
+								if st.TDD.Enabled {
+									resolvedMode = "resume"
+								} else {
+									resolvedMode = "rerun"
+								}
+							case "completed":
+								resolvedMode = "rerun"
+							}
+						}
+					}
 				}
+				if resolvedMode == "resume" {
+					if _, err := restoreRuntimeCheckpoint(wd, st); err != nil {
+						return err
+					}
+					if !st.TDD.Enabled {
+						return errors.New("recover resume unavailable: no persisted tdd state")
+					}
+				}
+				_ = appendRuntimeJournal(wd, runtimeJournalEntry{
+					Time:      now.Format(time.RFC3339),
+					SessionID: st.Runtime.SessionID,
+					ClusterID: st.Runtime.ClusterID,
+					NodeID:    st.Runtime.NodeID,
+					Command:   "recover",
+					Stage:     "start",
+					Mode:      string(st.Runtime.Mode),
+					Phase:     string(st.Phase),
+				})
 				st.Run.LastFailureCause = ""
-				if mode == "rerun" {
+				if resolvedMode == "rerun" {
 					st.Run.LastFailedStep = ""
 				}
-				st.ForcePhase(core.PhaseImplementation, "recover:"+mode, now)
-				st.SetLastResult("recover", mode, filepath.ToSlash(filepath.Join(".ax", "state.yaml")), now)
+				st.ForcePhase(core.PhaseImplementation, "recover:"+resolvedMode, now)
+				st.SetLastResult("recover", resolvedMode, st.Runtime.SessionJournal, now)
 				st.ClearLastError()
 				if err := st.Save(wd); err != nil {
 					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "recover: strategy=%s session=%s phase=%s\n", mode, st.Runtime.SessionID, st.Phase)
+				_ = appendRuntimeJournal(wd, runtimeJournalEntry{
+					Time:      time.Now().Format(time.RFC3339),
+					SessionID: st.Runtime.SessionID,
+					ClusterID: st.Runtime.ClusterID,
+					NodeID:    st.Runtime.NodeID,
+					Command:   "recover",
+					Stage:     "completed",
+					Mode:      string(st.Runtime.Mode),
+					Phase:     string(st.Phase),
+					Artifact:  st.Runtime.SessionJournal,
+				})
+				fmt.Fprintf(cmd.OutOrStdout(), "recover: strategy=%s session=%s phase=%s\n", resolvedMode, st.Runtime.SessionID, st.Phase)
 				return nil
 			})
 		},
@@ -461,6 +515,9 @@ func newDoctorCmd() *cobra.Command {
 					"phase":           st.Phase,
 					"runtime_mode":    st.Runtime.Mode,
 					"session_id":      st.Runtime.SessionID,
+					"cluster_id":      st.Runtime.ClusterID,
+					"node_id":         st.Runtime.NodeID,
+					"journal_path":    st.Runtime.SessionJournal,
 					"active_sessions": len(st.Runtime.ActiveSessions),
 					"lock_files":      len(entries),
 					"state_file":      filepath.ToSlash(filepath.Join(".ax", "state.yaml")),
@@ -476,6 +533,9 @@ func newDoctorCmd() *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "phase: %s\n", payload["phase"])
 				fmt.Fprintf(cmd.OutOrStdout(), "runtime mode: %s\n", payload["runtime_mode"])
 				fmt.Fprintf(cmd.OutOrStdout(), "session id: %s\n", emptyFallback(fmt.Sprint(payload["session_id"])))
+				fmt.Fprintf(cmd.OutOrStdout(), "cluster id: %s\n", emptyFallback(fmt.Sprint(payload["cluster_id"])))
+				fmt.Fprintf(cmd.OutOrStdout(), "node id: %s\n", emptyFallback(fmt.Sprint(payload["node_id"])))
+				fmt.Fprintf(cmd.OutOrStdout(), "journal path: %s\n", emptyFallback(fmt.Sprint(payload["journal_path"])))
 				fmt.Fprintf(cmd.OutOrStdout(), "active sessions: %d\n", payload["active_sessions"])
 				fmt.Fprintf(cmd.OutOrStdout(), "lock files: %d\n", payload["lock_files"])
 				fmt.Fprintf(cmd.OutOrStdout(), "state file: %s\n", payload["state_file"])
@@ -566,6 +626,8 @@ func ensureMVPLayout(base string) error {
 		filepath.Join(base, ".ax", "reviews"),
 		filepath.Join(base, ".ax", "compound"),
 		filepath.Join(base, ".ax", "worktrees"),
+		filepath.Join(base, ".ax", "runtime"),
+		filepath.Join(base, ".ax", "runtime", "checkpoints"),
 		filepath.Join(base, ".ax", "skills", "builtin"),
 		filepath.Join(base, ".ax", "skills", "custom"),
 	}
@@ -792,6 +854,19 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 	if err := st.Transition(core.PhaseImplementation, "run", now); err != nil {
 		return "", 0, err
 	}
+	if err := appendRuntimeJournal(base, runtimeJournalEntry{
+		Time:      now.Format(time.RFC3339),
+		SessionID: st.Runtime.SessionID,
+		ClusterID: st.Runtime.ClusterID,
+		NodeID:    st.Runtime.NodeID,
+		Command:   "run",
+		Stage:     "start",
+		Mode:      string(st.Runtime.Mode),
+		Phase:     string(st.Phase),
+		PlanID:    planID,
+	}); err != nil {
+		return "", 0, err
+	}
 	prevTDD := st.TDD
 
 	runName := fmt.Sprintf("%s-run-%s.md", sanitizeToken(planID), now.Format("20060102-150405"))
@@ -827,6 +902,23 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 	}
 	st.SetLastResult("run", "started", filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(startLog))), now)
 	if err := st.Save(base); err != nil {
+		return "", 0, err
+	}
+	if err := writeRuntimeCheckpoint(base, st, "in_progress", "run", now); err != nil {
+		return "", 0, err
+	}
+	if err := appendRuntimeJournal(base, runtimeJournalEntry{
+		Time:      time.Now().Format(time.RFC3339),
+		SessionID: st.Runtime.SessionID,
+		ClusterID: st.Runtime.ClusterID,
+		NodeID:    st.Runtime.NodeID,
+		Command:   "run",
+		Stage:     "checkpoint",
+		Mode:      string(st.Runtime.Mode),
+		Phase:     string(st.Phase),
+		PlanID:    planID,
+		Artifact:  filepath.ToSlash(filepath.Join(".ax", "state.yaml")),
+	}); err != nil {
 		return "", 0, err
 	}
 
@@ -877,6 +969,20 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 		if err := st.Save(base); err != nil {
 			return "", 0, err
 		}
+		_ = writeRuntimeCheckpoint(base, st, "failed", "run", time.Now())
+		_ = appendRuntimeJournal(base, runtimeJournalEntry{
+			Time:      time.Now().Format(time.RFC3339),
+			SessionID: st.Runtime.SessionID,
+			ClusterID: st.Runtime.ClusterID,
+			NodeID:    st.Runtime.NodeID,
+			Command:   "run",
+			Stage:     "failed",
+			Mode:      string(st.Runtime.Mode),
+			Phase:     string(st.Phase),
+			PlanID:    planID,
+			ErrorCode: errCode,
+			Error:     errMsg,
+		})
 		return "", 0, errors.New(errMsg)
 	}
 
@@ -886,7 +992,7 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 		proposalRef := proposalRefFromPlan(planID, string(body), st.Current.Proposal)
 		worktreeMode = "enabled"
 		worktreeDir := filepath.Join(base, ".ax", "worktrees", sanitizeToken(proposalRef))
-		if st.Runtime.Mode == core.RuntimeModeWorktree {
+		if st.Runtime.Mode == core.RuntimeModeWorktree || st.Runtime.Mode == core.RuntimeModeShared {
 			worktreeDir = filepath.Join(worktreeDir, sanitizeToken(st.Runtime.SessionID))
 		}
 		if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
@@ -1031,6 +1137,21 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 	if err := st.Save(base); err != nil {
 		return "", 0, err
 	}
+	if err := writeRuntimeCheckpoint(base, st, "completed", "run", time.Now()); err != nil {
+		return "", 0, err
+	}
+	_ = appendRuntimeJournal(base, runtimeJournalEntry{
+		Time:      time.Now().Format(time.RFC3339),
+		SessionID: st.Runtime.SessionID,
+		ClusterID: st.Runtime.ClusterID,
+		NodeID:    st.Runtime.NodeID,
+		Command:   "run",
+		Stage:     "completed",
+		Mode:      string(st.Runtime.Mode),
+		Phase:     string(st.Phase),
+		PlanID:    planID,
+		Artifact:  filepath.ToSlash(filepath.Join(".ax", "runs", runName)),
+	})
 
 	return runPath, taskCount, nil
 }
@@ -1455,15 +1576,27 @@ func createCompound(base string, audit bool, rt runtimeContext, now time.Time) (
 }
 
 func resolveRuntimeContext(cmd *cobra.Command, now time.Time) (runtimeContext, error) {
-	rawMode, err := cmd.Root().PersistentFlags().GetString("runtime-mode")
+	flags := cmd.Root().PersistentFlags()
+	rawMode, err := flags.GetString("runtime-mode")
 	if err != nil {
 		return runtimeContext{}, err
+	}
+	if !flags.Changed("runtime-mode") {
+		rawMode = strings.TrimSpace(rawMode)
 	}
 	mode, err := core.ResolveRuntimeMode(rawMode)
 	if err != nil {
 		return runtimeContext{}, err
 	}
-	sessionID, err := cmd.Root().PersistentFlags().GetString("session-id")
+	sessionID, err := flags.GetString("session-id")
+	if err != nil {
+		return runtimeContext{}, err
+	}
+	clusterID, err := flags.GetString("cluster-id")
+	if err != nil {
+		return runtimeContext{}, err
+	}
+	nodeID, err := flags.GetString("node-id")
 	if err != nil {
 		return runtimeContext{}, err
 	}
@@ -1474,6 +1607,8 @@ func resolveRuntimeContext(cmd *cobra.Command, now time.Time) (runtimeContext, e
 	return runtimeContext{
 		mode:      mode,
 		sessionID: sessionID,
+		clusterID: strings.TrimSpace(clusterID),
+		nodeID:    strings.TrimSpace(nodeID),
 	}, nil
 }
 
@@ -1481,23 +1616,46 @@ func applyRuntimeState(st *core.State, rt runtimeContext, command string) {
 	if st == nil {
 		return
 	}
+	now := time.Now()
 	if rt.mode == "" {
 		rt.mode = core.RuntimeModeSingle
 	}
 	st.Runtime.Mode = rt.mode
+	st.Runtime.ClusterID = core.ResolveRuntimeClusterID(rt.clusterID)
+	st.Runtime.NodeID = core.ResolveRuntimeNodeID(rt.nodeID)
+	st.Runtime.SessionJournal = filepath.ToSlash(filepath.Join(".ax", "logs", "runtime-journal.jsonl"))
 	if strings.TrimSpace(rt.sessionID) == "" {
-		rt.sessionID = core.NewSessionID(time.Now())
+		rt.sessionID = core.NewSessionID(now)
 	}
 	st.Runtime.SessionID = rt.sessionID
 	if st.Runtime.ActiveSessions == nil {
 		st.Runtime.ActiveSessions = map[string]string{}
 	}
+	if st.Runtime.SessionMeta == nil {
+		st.Runtime.SessionMeta = map[string]core.RuntimeSessionRef{}
+	}
 	st.Runtime.ActiveSessions[rt.sessionID] = command
+	meta := st.Runtime.SessionMeta[rt.sessionID]
+	if meta.StartedAt == "" {
+		meta.StartedAt = now.Format(time.RFC3339)
+	}
+	meta.SessionID = rt.sessionID
+	meta.Command = command
+	meta.Mode = rt.mode
+	meta.ClusterID = st.Runtime.ClusterID
+	meta.NodeID = st.Runtime.NodeID
+	meta.UpdatedAt = now.Format(time.RFC3339)
+	meta.Status = "active"
+	st.Runtime.SessionMeta[rt.sessionID] = meta
 	if len(st.Runtime.ActiveSessions) > 64 {
 		// best-effort pruning: keep current session only when map grows too large.
 		current := st.Runtime.ActiveSessions[rt.sessionID]
 		st.Runtime.ActiveSessions = map[string]string{
 			rt.sessionID: current,
+		}
+		currentMeta := st.Runtime.SessionMeta[rt.sessionID]
+		st.Runtime.SessionMeta = map[string]core.RuntimeSessionRef{
+			rt.sessionID: currentMeta,
 		}
 	}
 }
@@ -1785,6 +1943,164 @@ func writeObservabilityLog(path, step, phase, threadID, turnID, errorCode, messa
 		"",
 	}, "\n")
 	return os.WriteFile(path, []byte(payload), 0o644)
+}
+
+type runtimeCheckpoint struct {
+	SessionID string        `json:"session_id"`
+	Status    string        `json:"status"`
+	Command   string        `json:"command,omitempty"`
+	Mode      string        `json:"mode,omitempty"`
+	Phase     string        `json:"phase,omitempty"`
+	UpdatedAt string        `json:"updated_at,omitempty"`
+	TDD       core.TDDState `json:"tdd"`
+	Run       core.RunState `json:"run,omitempty"`
+}
+
+func runtimeCheckpointPath(base, sessionID string) string {
+	id := sanitizeToken(sessionID)
+	if id == "" {
+		id = "session"
+	}
+	return filepath.Join(base, ".ax", "runtime", "checkpoints", id+".json")
+}
+
+func writeRuntimeCheckpoint(base string, st *core.State, status, command string, at time.Time) error {
+	if st == nil || strings.TrimSpace(st.Runtime.SessionID) == "" {
+		return nil
+	}
+	path := runtimeCheckpointPath(base, st.Runtime.SessionID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	cp := runtimeCheckpoint{
+		SessionID: st.Runtime.SessionID,
+		Status:    strings.TrimSpace(status),
+		Command:   strings.TrimSpace(command),
+		Mode:      string(st.Runtime.Mode),
+		UpdatedAt: at.Format(time.RFC3339),
+		Phase:     string(st.Phase),
+		TDD:       st.TDD,
+		Run:       st.Run,
+	}
+	body, err := json.MarshalIndent(cp, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(body, '\n'), 0o644)
+}
+
+func loadRuntimeCheckpoint(base, sessionID string) (runtimeCheckpoint, bool, error) {
+	path := runtimeCheckpointPath(base, sessionID)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return runtimeCheckpoint{}, false, nil
+		}
+		return runtimeCheckpoint{}, false, err
+	}
+	var cp runtimeCheckpoint
+	if err := json.Unmarshal(body, &cp); err != nil {
+		return runtimeCheckpoint{}, false, err
+	}
+	return cp, true, nil
+}
+
+func restoreRuntimeCheckpoint(base string, st *core.State) (runtimeCheckpoint, error) {
+	if st == nil {
+		return runtimeCheckpoint{}, nil
+	}
+	cp, ok, err := loadRuntimeCheckpoint(base, st.Runtime.SessionID)
+	if err != nil {
+		return runtimeCheckpoint{}, err
+	}
+	if !ok {
+		return runtimeCheckpoint{}, nil
+	}
+
+	// Restore missing resume state from checkpoint payload.
+	if !st.TDD.Enabled && cp.TDD.Enabled {
+		st.TDD = cp.TDD
+	}
+	if strings.TrimSpace(st.Run.LastFailedStep) == "" && strings.TrimSpace(cp.Run.LastFailedStep) != "" {
+		st.Run.LastFailedStep = cp.Run.LastFailedStep
+	}
+	if strings.TrimSpace(st.Run.LastFailureCause) == "" && strings.TrimSpace(cp.Run.LastFailureCause) != "" {
+		st.Run.LastFailureCause = cp.Run.LastFailureCause
+	}
+
+	return cp, nil
+}
+
+type runtimeJournalEntry struct {
+	Time      string `json:"time"`
+	SessionID string `json:"session_id"`
+	ClusterID string `json:"cluster_id,omitempty"`
+	NodeID    string `json:"node_id,omitempty"`
+	Command   string `json:"command"`
+	Stage     string `json:"stage"`
+	Mode      string `json:"mode,omitempty"`
+	Phase     string `json:"phase,omitempty"`
+	PlanID    string `json:"plan_id,omitempty"`
+	Artifact  string `json:"artifact,omitempty"`
+	ErrorCode string `json:"error_code,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+func runtimeJournalPath(base string) string {
+	return filepath.Join(base, ".ax", "logs", "runtime-journal.jsonl")
+}
+
+func appendRuntimeJournal(base string, entry runtimeJournalEntry) error {
+	if strings.TrimSpace(entry.Time) == "" {
+		entry.Time = time.Now().Format(time.RFC3339)
+	}
+	path := runtimeJournalPath(base)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	body, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Write(append(body, '\n')); err != nil {
+		return err
+	}
+	return nil
+}
+
+func latestRuntimeJournalEntry(base, sessionID, command string) (runtimeJournalEntry, bool, error) {
+	path := runtimeJournalPath(base)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return runtimeJournalEntry{}, false, nil
+		}
+		return runtimeJournalEntry{}, false, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var entry runtimeJournalEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if strings.TrimSpace(sessionID) != "" && entry.SessionID != sessionID {
+			continue
+		}
+		if strings.TrimSpace(command) != "" && entry.Command != command {
+			continue
+		}
+		return entry, true, nil
+	}
+	return runtimeJournalEntry{}, false, nil
 }
 
 func extractTaskIDs(tasksPath string) ([]string, error) {

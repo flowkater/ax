@@ -1,3 +1,0 @@
-{"event_id":"d3b33f50-8e4d-49e1-920a-a27ca71099ba","team":"go-test-race-go-vet-go-build-a","created_at":"2026-02-26T11:05:47.735Z","type":"message_received","worker":"leader-fixed","message_id":"0bbd0e03-9116-4b90-9e13-fd16cdcbd8aa"}
-{"event_id":"7d0eaf8c-eb99-4143-80de-f22492f19a14","team":"go-test-race-go-vet-go-build-a","created_at":"2026-02-26T11:06:01.866Z","type":"message_received","worker":"leader-fixed","message_id":"8ddc60c9-38d5-4e2e-8f93-4f063cade332"}
-{"event_id":"519c39d8-1121-4ebb-8271-3d8c680b064d","team":"go-test-race-go-vet-go-build-a","created_at":"2026-02-26T11:06:04.257Z","type":"message_received","worker":"leader-fixed","message_id":"e0753acb-e341-4b95-8817-d9ebd380ce14"}

@@ -177,3 +177,156 @@ Result: `rc=0`
 ### 8.4 Conclusion update
 - Shared workspace parallel contention issue(phase transition conflict)는 runtime hardening으로 해소됨.
 - 현재 기준에서 soak/load/kill-recovery 모두 프로덕션 운영 가능한 수준으로 재검증 완료.
+
+---
+
+## 9) Runtime Hardening Final Revalidation (worker-2, 2026-02-26)
+
+### 9.1 Code hardening applied
+- Runtime metadata 확장: `cluster_id`, `node_id`, `session_journal`, `session_meta`
+- Root persistent flags 확장: `--cluster-id`, `--node-id` (+ env fallback `AX_CLUSTER_ID`, `AX_NODE_ID`)
+- Shared/worktree concurrency semantics 강화:
+  - shared/worktree 모두 session-isolated worktree 경로 사용
+  - `.ax/worktrees/<proposal>/<session-id>/worktree.yaml`
+- Journal/recovery hardening:
+  - `runtime-journal.jsonl` start/checkpoint/completed/failed 기록
+  - `.ax/runtime/checkpoints/<session-id>.json` checkpoint 저장/복원
+  - `recover --strategy auto`의 resume/rerun 결정 로직 보강
+
+### 9.2 Fresh evidence (real binary)
+- Evidence root: `/var/folders/h8/941vlqss6tqd_mfy7g77n98h0000gn/T/ax-worker2-final-pwy0h6i0`
+- Summary: `/var/folders/h8/941vlqss6tqd_mfy7g77n98h0000gn/T/ax-worker2-final-pwy0h6i0/summary.json`
+- Binary: `/var/folders/h8/941vlqss6tqd_mfy7g77n98h0000gn/T/ax-worker2-final-pwy0h6i0/ax`
+- Binary SHA256: `3638d46c64689a553f034dd57702bb0a981e7e2223dc498633deb65fd00e5217`
+
+Track results:
+- Track-1 sequential soak: **20/20 success**
+  - detail: `/var/folders/h8/941vlqss6tqd_mfy7g77n98h0000gn/T/ax-worker2-final-pwy0h6i0/track1-sequential-soak.json`
+- Track-2 shared parallel load (48 jobs, 8 workers): **48/48 success**
+  - detail: `/var/folders/h8/941vlqss6tqd_mfy7g77n98h0000gn/T/ax-worker2-final-pwy0h6i0/track2-shared-load.json`
+- Track-3 kill-recovery (12 attempts): **12/12 success**
+  - SIGKILL delivered: 12/12
+  - state JSON integrity: 12/12
+  - recover success: 12/12
+  - detail: `/var/folders/h8/941vlqss6tqd_mfy7g77n98h0000gn/T/ax-worker2-final-pwy0h6i0/track3-kill-recovery.json`
+
+### 9.3 Fresh baseline quality gates
+- `go test -race ./...` PASS (`go-test-race.log`)
+- `go vet ./...` PASS (`go-vet.log`)
+- `go build ./...` PASS (`go-build.log`)
+
+### 9.4 Final risk statement
+- unresolved risks: **none**
+
+---
+
+## 9) Worker-3 Final Runtime Evidence Refresh (2026-02-26)
+
+### 9.1 Environment (latest run)
+- Run window (UTC): **2026-02-26T12:00:11Z ~ 2026-02-26T12:01:13Z**
+- Repo: `/Users/flowkater/.superset/projects/ax` (commit `ac653fc`)
+- Built binary: `/tmp/ax-worker3-evidence-20260226-210011/ax`
+- Binary SHA256: `3638d46c64689a553f034dd57702bb0a981e7e2223dc498633deb65fd00e5217`
+- Evidence root: `/tmp/ax-worker3-evidence-20260226-210011`
+
+### 9.2 Quality gate logs
+- `go test -race ./...` log: `/tmp/ax-worker3-evidence-20260226-210011/go-test-race.log` (**PASS**)
+- `go vet ./...` log: `/tmp/ax-worker3-evidence-20260226-210011/go-vet.log` (**PASS**)
+- `go build ./...` log: `/tmp/ax-worker3-evidence-20260226-210011/go-build.log` (**PASS**)
+
+### 9.3 Real binary soak/load/kill summary
+Source summary: `/tmp/ax-worker3-evidence-20260226-210011/runtime-summary.json`
+
+- Track-1 sequential soak:
+  - iterations: 12
+  - success/failure: **12 / 0**
+  - detail: `/tmp/ax-worker3-evidence-20260226-210011/track1-sequential.json`
+- Track-2 shared parallel load:
+  - jobs/workers: 24 / 6
+  - success/failure: **24 / 0**
+  - detail: `/tmp/ax-worker3-evidence-20260226-210011/track2-parallel.json`
+- Track-3 kill-recovery:
+  - attempts: 6
+  - SIGKILL delivered: **6 / 6**
+  - success/failure: **6 / 0**
+  - detail: `/tmp/ax-worker3-evidence-20260226-210011/track3-kill-recovery.json`
+
+### 9.4 Conclusion (latest)
+- Runtime metadata/journal/checkpoint + shared session worktree isolation 변경 이후 최신 실바이너리 시나리오에서 soak/load/kill 모두 PASS.
+- 현재 evidence 기준 unresolved production risk: **none**.
+
+---
+
+## 10) Worker-1 Runtime Revalidation Refresh (2026-02-26)
+
+### 10.1 Environment (latest run)
+- Run window (UTC): **2026-02-26T12:01:48Z ~ 2026-02-26T12:01:57Z**
+- Repo: `/Users/flowkater/.superset/projects/ax` (commit `ac653fc`)
+- Built binary: `/tmp/ax-prod-soak-20260226-120148/ax`
+- Binary SHA256: `3638d46c64689a553f034dd57702bb0a981e7e2223dc498633deb65fd00e5217`
+- Evidence root: `/tmp/ax-prod-soak-20260226-120148`
+
+### 10.2 Quality gate logs
+- `go test -race ./...` log: `/tmp/ax-prod-soak-20260226-120148/go-test-race.log` (**PASS**)
+- `go vet ./...` log: `/tmp/ax-prod-soak-20260226-120148/go-vet.log` (**PASS**)
+- `go build ./...` log: `/tmp/ax-prod-soak-20260226-120148/go-build.log` (**PASS**)
+
+### 10.3 Real binary soak/load/kill summary
+Source summary: `/tmp/ax-prod-soak-20260226-120148/summary.json`
+
+- Track-1 sequential soak:
+  - iterations: 20
+  - success/failure: **20 / 0**
+  - detail: `/tmp/ax-prod-soak-20260226-120148/track1.json`
+- Track-2 shared parallel load:
+  - jobs/workers: 48 / 8
+  - success/failure: **48 / 0**
+  - detail: `/tmp/ax-prod-soak-20260226-120148/track2.json`
+- Track-3 kill-recovery:
+  - attempts: 12
+  - SIGKILL delivered: **12 / 12**
+  - state JSON parse ok: **12 / 12**
+  - success/failure: **12 / 0**
+  - detail: `/tmp/ax-prod-soak-20260226-120148/track3.json`
+
+### 10.4 Conclusion (latest)
+- runtime metadata(클러스터/노드/세션) + session worktree isolation + journal/checkpoint/recover 보강 후 최신 실바이너리 재검증에서도 soak/load/kill 전 항목 PASS.
+- 현재 evidence 기준 unresolved production risk: **none**.
+
+---
+
+## 11) Leader Final Production Gate Refresh (2026-02-26)
+
+### 11.1 Fresh quality gates
+- `go test -count=1 ./...` **PASS**
+- `go test -count=1 -race ./...` **PASS**
+- `go vet ./...` **PASS**
+- `go build ./...` **PASS**
+
+### 11.2 Real binary full smoke (runtime/doctor/recover 포함)
+- Evidence root: `/tmp/ax-live-verify-debug3-iYIOCG`
+- Summary: `/tmp/ax-live-verify-debug3-iYIOCG/live-runtime-summary.json`
+- Scenario:
+  - `state`
+  - `propose/plan/run` (shared session)
+  - `doctor runtime --json`
+  - `recover --strategy auto`
+  - `discover runtime --party`
+  - `review --proposal`
+  - `compound --audit`
+  - `verify --proposal --tests pass --build pass --ac pass`
+  - `archive --proposal`
+  - `state --json`
+
+### 11.3 Soak / Load / Kill refresh
+- Evidence root: `/tmp/ax-live-soak-final-CVRKO7`
+- Summary: `/tmp/ax-live-soak-final-CVRKO7/summary.json`
+- Track-1 sequential soak: **10/10 success**
+- Track-2 shared parallel load: **16/16 success**
+- Track-3 kill + recover:
+  - SIGKILL delivered: **6/6**
+  - recover auto success: **6/6**
+
+### 11.4 Final statement
+- 최신 리더 재검증 기준에서도 soak/load/kill + runtime recover 경로 모두 정상.
+- 현재 기준 unresolved production blocker: **none**.

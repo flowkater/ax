@@ -9,8 +9,10 @@ func NewRootCmd() *cobra.Command {
 		Long:         "ax v2 MVP command-line interface for propose-plan-run-verify-archive workflows.",
 		SilenceUsage: true,
 	}
-	root.PersistentFlags().String("runtime-mode", "single", "Runtime mode (single|shared|worktree|auto)")
+	root.PersistentFlags().String("runtime-mode", "", "Runtime mode override (single|shared|worktree|auto); defaults to AX_RUNTIME_MODE or single")
 	root.PersistentFlags().String("session-id", "", "Explicit runtime session id (optional)")
+	root.PersistentFlags().String("cluster-id", "", "Runtime cluster id override (optional; defaults to AX_CLUSTER_ID/AX_RUNTIME_CLUSTER/local)")
+	root.PersistentFlags().String("node-id", "", "Runtime node id override (optional; defaults to AX_NODE_ID or hostname:pid)")
 
 	root.AddCommand(newProposeCmd())
 	root.AddCommand(newPlanCmd())
