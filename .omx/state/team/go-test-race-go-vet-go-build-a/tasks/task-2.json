@@ -1,0 +1,15 @@
+{
+  "subject": "Worker 2 bootstrap",
+  "description": "Coordinate on: 프로덕션 레벨 검증: go test -race/go vet/go build, 실제 ax 바이너리 E2E(quality gate fail/force steer/discover party/review/compound/verify/archive strict&override/quick escalation) 실행 후 PASS/FAIL 근거를 보고하라\n\nReport findings/results back to the lead and keep task updates current.",
+  "status": "in_progress",
+  "owner": "worker-2",
+  "id": "2",
+  "depends_on": [],
+  "version": 2,
+  "created_at": "2026-02-26T11:05:26.156Z",
+  "claim": {
+    "owner": "worker-2",
+    "token": "116afa76-fe56-4733-95b1-81ed84d69212",
+    "leased_until": "2026-02-26T11:20:53.514Z"
+  }
+}

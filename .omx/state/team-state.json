@@ -1,0 +1,15 @@
+{
+  "active": true,
+  "mode": "team",
+  "iteration": 0,
+  "max_iterations": 50,
+  "current_phase": "team-exec",
+  "task_description": "프로덕션 레벨 검증: go test -race/go vet/go build, 실제 ax 바이너리 E2E(quality gate fail/force steer/discover party/review/compound/verify/archive strict&override/quick escalation) 실행 후 PASS/FAIL 근거를 보고하라",
+  "started_at": "2026-02-26T11:05:29.139Z",
+  "tmux_pane_id": "%161",
+  "tmux_pane_set_at": "2026-02-26T11:05:29.139Z",
+  "linked_ralph": false,
+  "team_name": "go-test-race-go-vet-go-build-a",
+  "agent_count": 3,
+  "agent_types": "reviewer"
+}

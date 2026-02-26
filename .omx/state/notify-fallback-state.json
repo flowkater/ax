@@ -1,0 +1,9 @@
+{
+  "pid": 97270,
+  "started_at": "2026-02-26T01:33:15.315Z",
+  "cwd": "/Users/flowkater/.superset/projects/ax",
+  "notify_script": "/Users/flowkater/.nvm/versions/node/v22.12.0/lib/node_modules/oh-my-codex/scripts/notify-hook.js",
+  "poll_ms": 700,
+  "tracked_files": 1,
+  "seen_turns": 0
+}

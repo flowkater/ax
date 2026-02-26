@@ -40,9 +40,39 @@ type Turn struct {
 	CreatedAt string `json:"created_at"`
 }
 
+const (
+	// StreamEventDelta is emitted for token/chunk payloads.
+	StreamEventDelta = "delta"
+	// StreamEventCompleted is emitted when stream completes.
+	StreamEventCompleted = "completed"
+)
+
+// StreamEvent exposes streaming deltas/completion events for a turn.
+type StreamEvent struct {
+	Type      string `json:"type"` // delta | completed
+	ThreadID  string `json:"thread_id,omitempty"`
+	TurnID    string `json:"turn_id,omitempty"`
+	Delta     string `json:"delta,omitempty"`
+	Completed bool   `json:"completed,omitempty"`
+}
+
+// InterruptResult reports interrupt acknowledgement.
+type InterruptResult struct {
+	Interrupted bool   `json:"interrupted"`
+	ThreadID    string `json:"thread_id,omitempty"`
+	TurnID      string `json:"turn_id,omitempty"`
+}
+
 // AppServerAdapter defines the boundary for Codex app-server integration.
 type AppServerAdapter interface {
 	CreateThread(ctx context.Context, title string) (*Thread, error)
 	RunTurn(ctx context.Context, threadID, prompt string) (*Turn, error)
 	GetThread(ctx context.Context, threadID string) (*Thread, error)
+
+	ResumeSession(ctx context.Context, threadID string) (*Thread, error)
+	ForkSession(ctx context.Context, threadID string) (*Thread, error)
+	RollbackTurns(ctx context.Context, threadID, toTurnID string) (*Thread, error)
+	SteerTurn(ctx context.Context, threadID, turnID, instruction string) (*Turn, error)
+	InterruptTurn(ctx context.Context, threadID, turnID string) (*InterruptResult, error)
+	StreamTurn(ctx context.Context, threadID, prompt string) (<-chan StreamEvent, error)
 }

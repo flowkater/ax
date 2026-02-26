@@ -1,0 +1,46 @@
+{
+  "last_nudged_by_team": {
+    "3-executor-1-reviewer-docs-ax": {
+      "at": "2026-02-26T01:40:14.403Z",
+      "last_message_id": "9ce683d8-ee30-45b6-b830-1a96ff3ab7ed"
+    },
+    "tdd-go-loop-docs-ax-v2-tdd-imp": {
+      "at": "2026-02-26T05:02:26.425Z",
+      "last_message_id": "595f773e-0fa7-486d-98db-631c3b92c08d"
+    },
+    "3-tier-t1-t4-docs-ax-v2-cli-re": {
+      "at": "2026-02-26T05:11:03.510Z",
+      "last_message_id": "02321053-4833-4627-add2-53b5a1ea1f39"
+    },
+    "critical-implement-code-not-do": {
+      "at": "2026-02-26T06:07:56.065Z",
+      "last_message_id": "29959865-71e7-42bd-a2cd-c99aa73a3fda"
+    },
+    "review-the-newly-implemented-c": {
+      "at": "2026-02-26T06:20:21.411Z",
+      "last_message_id": "79316ddc-70ec-461e-a274-14729d9d6742"
+    },
+    "complete-remaining-code-gaps-t": {
+      "at": "2026-02-26T06:55:57.770Z",
+      "last_message_id": "31e1ba3e-f234-4067-96fc-49b6155bbd3a"
+    }
+  },
+  "last_idle_nudged_by_team": {
+    "tdd-go-loop-docs-ax-v2-tdd-imp": {
+      "at": "2026-02-26T05:02:26.425Z",
+      "worker_count": 3
+    },
+    "3-tier-t1-t4-docs-ax-v2-cli-re": {
+      "at": "2026-02-26T05:11:03.510Z",
+      "worker_count": 2
+    },
+    "critical-implement-code-not-do": {
+      "at": "2026-02-26T06:07:56.065Z",
+      "worker_count": 3
+    },
+    "review-the-newly-implemented-c": {
+      "at": "2026-02-26T06:20:21.411Z",
+      "worker_count": 2
+    }
+  }
+}

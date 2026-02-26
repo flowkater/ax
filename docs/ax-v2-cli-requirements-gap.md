@@ -538,3 +538,78 @@ ax는 외부 의존 없이 아래 스킬을 자체 내장해야 한다.
 24. tdd-go-loop critical 이슈 시 progression gate 차단 테스트
 25. interview 질문 생성→답변 수집→proposal 반영 E2E 테스트
 26. 내장 스킬 6개 로딩 + registry.yaml 매핑 정합성 테스트
+
+---
+
+## 17) 최종 재검증 (2026-02-26, Worker-3)
+
+### 17.1 이번 보강으로 닫힌 코드 갭
+- TDD tier progression gate(T0→T1→T2) + state persistence/테스트 반영
+- approval policy 엔진(`never/on-failure/unless-allow-listed/always`) run 경로/테스트 반영
+- verify previous-vs-current diff 산출(`verify-diff.md` + verify 본문 참조) 반영
+- compound triage 실구현(FixCandidate/Document/Noise) + gotcha schema 필드 반영 + `--audit` decay/archive 후보 보고 반영
+- context_chain 임계치 초과 시 compaction 트리거 + 로그 반영/테스트 검증
+- worktree 경로를 plan `from:` 기준으로 결정(결정성) + reject 실패 경로 부작용 방지(불필요 worktree 미생성)
+
+### 17.2 재검증 증거
+- `go test ./...` **PASS** (2026-02-26)
+- `go build ./...` **PASS** (2026-02-26)
+- CLI E2E `propose→plan→run→verify→archive` **PASS** (2026-02-26)
+
+### 17.3 잔여 오픈 항목(갭 클로징 범위)
+- 없음 (본 gap 문서의 Must 범위는 코드/테스트/E2E 기준으로 재검증 완료)
+
+---
+
+## 18) 최종 재검증 보강 (2026-02-26, Worker-1)
+
+### 18.1 체크리스트 동기화
+- 1/3, 2/3, 3/3 문서의 T2~T3 체크리스트가 코드/테스트 결과와 일치함을 재확인
+- tier progression gate(T0→T1→T2), approval policy, verify diff, compound triage/audit, compaction trigger, worktree 결정성/실패 부작용 방지 항목 반영 상태 재점검 완료
+
+### 18.2 실행 증거 (재검증)
+- `go test ./...` **PASS** (2026-02-26)
+- `go build ./...` **PASS** (2026-02-26)
+- CLI E2E `propose→plan→run→verify→archive` **PASS** (2026-02-26)
+
+---
+
+## 18) 최종 재검증 Addendum (2026-02-26, Worker-2)
+
+### 18.1 재검증/보강 포인트
+- approval policy 판단 로직/사유 표준화 + run 보고서 반영 검증
+- verify diff 포맷(Added/Removed 라인 포함) + verify 본문 `Previous Verify Diff` 섹션 회귀 검증
+- compound gotcha schema 파싱/triage/audit 회귀 검증
+- context compaction 저장 시 체인 길이 상한 유지 + compaction 로그 생성 회귀 검증
+- worktree 경로 결정성(`plan from`) 및 reject 실패 경로 무부수효과 재검증
+
+### 18.2 실행 증거
+- `go test ./...` **PASS**
+- `go build ./...` **PASS**
+- CLI E2E `propose→plan→run→verify→archive` **PASS**
+
+---
+
+## 19) 최종 구현 클로징 재검증 (2026-02-26, Leader)
+
+### 19.1 추가 반영 사항
+- `run` 보고서에 Step↔Turn 1:1 매핑 테이블 실구현(결정성 turn id 포함)
+- observability 로그에 synthetic thread/turn id 연동
+- `archive` 시 worktree lifecycle 마감(merged/cleaned snapshot 생성 + 원 worktree 정리)
+- streaming completed 누락 시 자동 보정(normalize) 로직 및 테스트 추가
+- builtin skill registry에 `tdd-go-loop` 체인 반영 + 계약 테스트 추가
+- `docs/mvp-walkthrough.md` 최신 실행 절차로 갱신
+
+### 19.2 최종 실행 증거 (2026-02-26)
+- `go test -v ./...` **PASS**
+- `go build ./...` **PASS**
+- 실동작 E2E (실제 `ax` 바이너리 직접 실행) **PASS**
+  - 경로: `/tmp/ax-v2-e2e-final3-AbNBgC`
+  - 시나리오: `state→propose→plan→run(quality gate fail/force)→discover --party→review→compound --audit→verify→archive(strict fail/allow override)→quick escalation→state --json`
+
+### 19.3 Gap 정합성 결론
+- `docs/ax-v2-tdd-implementation-master-plan.md`
+- `docs/ax-v2-tdd-test-matrix.md`
+- `docs/ax-v2-tdd-execution-and-final-review.md`
+
+위 3개 실행 문서와 본 gap 문서의 Must 요구사항을 대조한 결과, 현재 코드/테스트/실행 결과는 gap 기준과 정합함.

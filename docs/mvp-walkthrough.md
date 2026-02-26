@@ -1,65 +1,60 @@
-# ax v2 CLI MVP Walkthrough
+# ax v2 CLI Walkthrough (Updated: 2026-02-26)
 
-## 1) 초기화/상태 확인
+## 1) 초기화/상태
 ```bash
 ax state
+ax state --json
 ```
-생성 확인:
-- `.ax/state.yaml`
-- `.ax/{proposals,plans,archive,runs,discovery}`
-- `.ax/memory/{MEMORY.md,gotchas.md}`
+- `.ax/state.yaml` (phase/current/context/tdd/progress)
+- `.ax/skills/registry.yaml` (builtin skill contract)
 
-## 2) 제안 생성
+## 2) Propose → Plan
 ```bash
 ax propose "Build CLI MVP"
+ax plan --from .ax/proposals/<proposal-id>/proposal.md
 ```
-생성 확인:
-- `.ax/proposals/<id>/proposal.md`
-- `.ax/proposals/<id>/design.md`
-- `.ax/proposals/<id>/tasks.md`
-- `.ax/proposals/<id>/specs/`
+- proposal 필수 섹션 + `tasks.md` 체크리스트 10개+
+- plan 필수 섹션(phase/files/tests/rollback/task mapping)
 
-## 3) 계획 생성
+## 3) Run (TDD/Approval/Quality Gate)
 ```bash
-ax plan --from <proposal-id>
+ax run --plan .ax/plans/<proposal-id>-plan.md --tdd --loop --depth deep --approval-policy on-failure
 ```
-생성 확인:
-- `.ax/plans/<proposal-id>-plan.md`
+- 로그: `.ax/logs/*-{start,end,fail,compaction}.yaml`
+- 리포트: `.ax/runs/*-run-*.md`
+- Step↔Turn 1:1 매핑 표 포함
+- quality gate: 기본 3회, 초과 시 `--force --force-reason`
+- worktree: 기본 생성(`.ax/worktrees/<proposal-id>/worktree.yaml`), `--no-worktree`로 비활성
 
-## 4) 실행(run)
+## 4) Discover / Review / Compound
 ```bash
-ax run --plan <proposal-id>-plan.md
+ax discover "<topic>" --party
+ax review --proposal .ax/proposals/<proposal-id>/proposal.md
+ax compound --audit
 ```
-생성 확인:
-- `.ax/runs/<plan>-run-<timestamp>.md`
-- 플랜 내 미완료 task(`- [ ]`) 개수 감지/리포트
+- discover: 문제/옵션/트레이드오프/리스크/추천안 + Party(Architect/User/QA)
+- review: 8-lens 리뷰 산출물
+- compound: FixCandidate/Document/Noise triage + decay audit
 
-## 5) 탐색(discover)
+## 5) Verify → Archive
 ```bash
-ax discover <topic>
+ax verify --proposal .ax/proposals/<proposal-id>/proposal.md --tests pass --build pass --ac pass
+ax archive --proposal .ax/proposals/<proposal-id>/proposal.md
 ```
-생성 확인:
-- `.ax/discovery/<topic>-<timestamp>.md`
-- 워크스페이스 파일명/본문 기반 최대 20건 매치 리포트
+- verify: PASS/FAIL/CONDITIONAL PASS + Evidence + Unmet + Next Actions + verify diff
+- archive(strict 기본): verify.md 없으면 차단
+- 예외: `--allow-unverified-archive`
+- archive 시 metadata + worktree snapshot 생성, 원 worktree 정리
 
-## 6) 퀵 플로우(quick)
+## 6) Quick Escalation
 ```bash
-ax quick "fix-tests"
+ax quick "hotfix" --files-changed 7
 ```
-동작:
-1. proposal 자동 생성
-2. plan 자동 생성
-3. run 자동 실행
+- 임계치(`files>5` 또는 cross-module/core-touch) 초과 시 자동 승격:
+  - proposal + plan 생성 후 표준 플로우로 유도
 
-## 7) verify/archive
-```bash
-ax verify --proposal <proposal-id>
-ax archive --proposal <proposal-id>
-```
-생성/이동 확인:
-- `.ax/proposals/<proposal-id>/verify.md`
-- `.ax/archive/<proposal-id>/`
-
-## 8) Codex app-server 최소 연동
-- `internal/codex/client.go`의 JSON-RPC stdio 클라이언트 제공
-- `CreateThread`, `RunTurn`, `GetThread` 최소 메서드 구현
+## 7) Codex app-server integration
+- JSON-RPC stdio client
+- 기본 3메서드: `CreateThread`, `RunTurn`, `GetThread`
+- lifecycle: `ResumeSession`, `ForkSession`, `RollbackTurns`, `SteerTurn`, `InterruptTurn`
+- streaming: `StreamTurn` (`delta`, `completed`; completed 누락 시 자동 보정)
