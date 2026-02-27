@@ -1,9 +1,9 @@
 # ax v2 Codex App-Server 실제 연동 구현 계획 (보강본)
 
-- 작성일: **2026-02-26**
+- 작성일: **2026-02-26** (최종 업데이트: **2026-02-27**)
 - 대상 범위: `ax run/recover/doctor/tui` ↔ `internal/codex` ↔ codex app-server(JSON-RPC over stdio)
-- 현재 상태: `internal/codex/client.go`는 구현 완료, CLI 오케스트레이션 연결은 미완료
-- 목표: **scaffold 기반 가짜 turn 흐름을 실제 Codex Thread/Turn 흐름으로 전환**하면서, 기존 사용자 경험(폴백/복구/테스트 안정성)을 유지
+- 현재 상태: run/recover/doctor/tui 기본 연동은 완료, **TUI 자유 입력형 interactive shell UX는 미구현**
+- 목표: **scaffold 기반 가짜 turn 흐름을 실제 Codex Thread/Turn 흐름으로 전환**하면서, 운영 가능한 interactive 제어/관측성과 TUI 조작성을 확보
 
 ---
 
@@ -35,21 +35,24 @@
 | stream 정규화(`normalizeStreamEvents`) | ✅ | `internal/codex/client.go` |
 | helper-process 기반 codex client 테스트 | ✅ | `internal/codex/client_test.go` |
 
-### 1.2 아직 비어있는 연결 지점
+### 1.2 현재 남은 제품/운영 갭
 
 | 항목 | 상태 | 근거 파일 |
 |---|---|---|
-| CLI에서 codex adapter 생성/주입 | ❌ | `cmd/ax/commands.go` (`newRunCmd`, `runPlan`) |
-| 실제 thread/turn 상태 영속화 | ❌ | `internal/core/state.go` (`RunState`) |
-| run 단계별 실 turn 실행 루프 | ❌ | `cmd/ax/commands.go` (`runPlan`) |
-| recover 전략에 codex 세션 반영 | ❌ | `cmd/ax/commands.go` (`newRecoverCmd`) |
-| doctor/tui에서 codex 상태 노출 | ❌ | `cmd/ax/commands.go`, `internal/core/tui.go` |
+| CLI에서 codex adapter 생성/주입 | ✅ | `cmd/ax/commands.go` (`newRunCmd`, `runPlan`) |
+| 실제 thread/turn 상태 영속화 | ✅ | `internal/core/state.go` (`RunState`) |
+| run/recover lifecycle에 codex 세션 반영 | ✅ | `cmd/ax/commands.go` (`runPlan`, `newRecoverCmd`) |
+| doctor/tui에서 codex 상태 노출 | ✅ | `cmd/ax/commands.go`, `internal/core/tui.go` |
+| TUI 위험 액션(engine lifecycle) 동기화 | ✅ | `cmd/ax/tui_action_engine.go`, `cmd/ax/commands_test.go` |
+| TUI에서 자유 입력(prompt/명령) 전송 | ❌ | `cmd/ax/tui_interactive.go` (입력 박스/명령 파서 없음) |
+| TUI 내 live transcript/streaming 토큰 표시 | ❌ | snapshot 렌더 중심(`cmd/ax/tui_interactive.go`) |
+| TUI steer 지시문 사용자 입력 | ❌ | 고정 steer 문구(`cmd/ax/tui_action_engine.go`) |
 
 ### 1.3 핵심 전환점
 
 ```text
-현재:  runPlan() -> syntheticThreadID + 가짜 Step↔Turn 표
-목표:  runPlan() -> CreateThread/ResumeSession -> Step당 RunTurn/SteerTurn -> state에 실제 turn 누적
+현재:  run/recover/TUI action은 Codex lifecycle API와 연결되어 있으나, TUI는 키기반 액션+상태 조회 중심
+목표:  TUI 하단 command line 입력으로 prompt/slash-command를 전송하는 interactive shell UX 제공
 ```
 
 ---
@@ -383,11 +386,13 @@ Phase 0 (Factory/Mode)
   -> Phase 3 (resume/recover/lifecycle)
   -> Phase 4 (error mapping/observability)
   -> Phase 5 (doctor/tui/rollout)
+  -> Phase 6 (interactive tui command shell)
 ```
 
 - Phase 0~1은 병렬 가능(충돌 주의)
 - **Phase 2 전에는 real mode 품질 평가 금지**
 - Phase 3~5는 Phase 2 완료 이후 병렬 분할 가능
+- Phase 6은 Phase 5 기반 위에서 진행(기존 snapshot/action 회귀 유지 필수)
 
 ---
 
@@ -464,3 +469,10 @@ go build ./...
 - 리뷰 검증:
   - 자동 reviewer/architect 에이전트 스레드 한도(`max 6`)로 외부 아키텍트 호출이 제한되어,
     로컬 수동 아키텍처 점검 + 전수 테스트/스모크로 대체 검증 수행.
+
+---
+
+## 9) 분리 문서
+
+- TUI 인터랙티브 쉘 고도화 기획은 별도 문서로 분리:
+  - `docs/ax-v2-tui-interactive-shell-upgrade-plan-2026-02-27.md`

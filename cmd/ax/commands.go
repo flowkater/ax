@@ -815,21 +815,69 @@ func executeTUIAction(base string, rt runtimeContext, action string, now time.Ti
 			return err
 		}
 		applyRuntimeState(st, rt, "tui")
+		threadID := strings.TrimSpace(st.Run.ThreadID)
+		turnID := strings.TrimSpace(st.Run.ActiveTurnID)
+		actionThreadID, actionTurnID, actionErr := performTUIEngineAction(st, action, now)
+		if actionErr != nil {
+			errCode, errMsg, _ := codex.MapCodexError(actionErr)
+			if errCode == "" {
+				errCode = "AX_ENGINE_INTERNAL"
+			}
+			if errMsg == "" {
+				errMsg = actionErr.Error()
+			}
+			st.Run.ErrorCode = errCode
+			st.Run.ErrorSummary = errMsg
+			st.Run.RecoverHint = "check codex engine state then retry tui action"
+			st.SetLastError(errCode, errMsg, now)
+			if saveErr := st.Save(base); saveErr != nil {
+				return saveErr
+			}
+			_ = appendRuntimeJournal(base, runtimeJournalEntry{
+				Time:       now.Format(time.RFC3339),
+				SessionID:  rt.sessionID,
+				ClusterID:  rt.clusterID,
+				NodeID:     rt.nodeID,
+				Command:    "tui",
+				Stage:      "action_failed",
+				Mode:       string(rt.mode),
+				Phase:      string(st.Phase),
+				Artifact:   action,
+				ErrorCode:  errCode,
+				Error:      errMsg,
+				ThreadID:   emptyFallback(threadID),
+				TurnID:     emptyFallback(turnID),
+				EngineMode: st.Run.EngineMode,
+			})
+			return errors.New(errMsg)
+		}
+		if strings.TrimSpace(actionThreadID) != "" {
+			threadID = strings.TrimSpace(actionThreadID)
+		}
+		if strings.TrimSpace(actionTurnID) != "" {
+			turnID = strings.TrimSpace(actionTurnID)
+		}
+		st.Run.ErrorCode = ""
+		st.Run.ErrorSummary = ""
+		st.Run.RecoverHint = ""
 		st.SetLastResult("tui", "action:"+action, filepath.ToSlash(filepath.Join(".ax", "state.yaml")), now)
 		st.ClearLastError()
 		if err := st.Save(base); err != nil {
 			return err
 		}
 		_ = appendRuntimeJournal(base, runtimeJournalEntry{
-			Time:      now.Format(time.RFC3339),
-			SessionID: rt.sessionID,
-			ClusterID: rt.clusterID,
-			NodeID:    rt.nodeID,
-			Command:   "tui",
-			Stage:     "action",
-			Mode:      string(rt.mode),
-			Phase:     string(st.Phase),
-			Artifact:  action,
+			Time:       now.Format(time.RFC3339),
+			SessionID:  rt.sessionID,
+			ClusterID:  rt.clusterID,
+			NodeID:     rt.nodeID,
+			Command:    "tui",
+			Stage:      "action",
+			Mode:       string(rt.mode),
+			Phase:      string(st.Phase),
+			Artifact:   action,
+			ThreadID:   emptyFallback(threadID),
+			TurnID:     emptyFallback(turnID),
+			EngineMode: st.Run.EngineMode,
 		})
 		return nil
 	})
@@ -1389,19 +1437,14 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 	failLog := filepath.Join(base, ".ax", "logs", fmt.Sprintf("%s-%s-fail.yaml", sanitizeToken(planID), now.Format("20060102-150405")))
 	compactionLog := filepath.Join(base, ".ax", "logs", fmt.Sprintf("%s-%s-compaction.yaml", sanitizeToken(planID), now.Format("20060102-150405")))
 
-	callCtx := context.Background()
-	cancel := func() {}
-	if codexCfg.Timeout > 0 {
-		callCtx, cancel = context.WithTimeout(context.Background(), codexCfg.Timeout)
-	}
-	defer cancel()
-
 	var thread *codex.Thread
+	callCtx, cancel := newCodexRPCCallContext(codexCfg.Timeout)
 	if opts.resume && strings.TrimSpace(st.Run.ThreadID) != "" {
 		thread, err = engine.ResumeSession(callCtx, strings.TrimSpace(st.Run.ThreadID))
 	} else {
 		thread, err = engine.CreateThread(callCtx, planID)
 	}
+	cancel()
 	if err != nil {
 		errCode, errMsg, _ := codex.MapCodexError(err)
 		if errCode == "" {
@@ -1567,7 +1610,9 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 		}
 	}
 	stepTurn := buildStepTurnMappings(taskCount, opts.tdd, tddState)
-	startTurnID, endTurnID := firstLastTurnID(stepTurn)
+	streamDeltaEvents := 0
+	streamCompletedEvents := 0
+	_, endTurnID := firstLastTurnID(stepTurn)
 
 	if decision == "reject" {
 		rejectPolicy, evalErr := core.EvaluateApprovalPolicy(opts.approval, core.PhaseImplementation, decision, true)
@@ -1575,11 +1620,58 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 			return "", 0, evalErr
 		}
 		interruptTurnID := strings.TrimSpace(st.Run.ActiveTurnID)
-		if interruptTurnID == "" {
-			interruptTurnID = strings.TrimSpace(startTurnID)
+		if interruptTurnID == "" && len(st.Run.TurnHistory) > 0 {
+			interruptTurnID = strings.TrimSpace(st.Run.TurnHistory[len(st.Run.TurnHistory)-1].TurnID)
 		}
-		if interruptTurnID != "" {
-			_, _ = engine.InterruptTurn(callCtx, threadID, interruptTurnID)
+		if strings.TrimSpace(threadID) != "" {
+			callCtx, cancel := newCodexRPCCallContext(codexCfg.Timeout)
+			_, interruptErr := engine.InterruptTurn(callCtx, threadID, interruptTurnID)
+			cancel()
+			if interruptErr != nil {
+				errCode, errMsg, _ := codex.MapCodexError(interruptErr)
+				if errCode == "" {
+					errCode = "AX_ENGINE_INTERNAL"
+				}
+				if errMsg == "" {
+					errMsg = interruptErr.Error()
+				}
+				rejectErrMsg := "reject interrupt failed: " + errMsg
+				st.Run.RetryAttempts++
+				st.Run.LastFailedStep = "decision:reject:interrupt"
+				st.Run.LastFailureCause = "interrupt failed"
+				st.Run.ErrorCode = errCode
+				st.Run.ErrorSummary = rejectErrMsg
+				st.Run.RetryLimit = retryLimit
+				st.Run.RecoverHint = fmt.Sprintf("check codex interrupt path then run `ax run --plan %s --resume --retry %d`", planID, retryLimit)
+				st.SetLastError(errCode, rejectErrMsg, now)
+				st.SetLastResult("run", "failed", filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(failLog))), now)
+				_ = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(failLog))))
+				if err := writeObservabilityLog(failLog, "run_reject_interrupt_failed", string(core.PhaseImplementation), threadID, interruptTurnID, errCode, rejectErrMsg, now, 0, st.Run.EngineMode); err != nil {
+					return "", 0, err
+				}
+				if err := st.Save(base); err != nil {
+					return "", 0, err
+				}
+				_ = writeRuntimeCheckpoint(base, st, "failed", "run", time.Now())
+				_ = appendRuntimeJournal(base, runtimeJournalEntry{
+					Time:       time.Now().Format(time.RFC3339),
+					SessionID:  st.Runtime.SessionID,
+					ClusterID:  st.Runtime.ClusterID,
+					NodeID:     st.Runtime.NodeID,
+					Command:    "run",
+					Stage:      "failed",
+					Mode:       string(st.Runtime.Mode),
+					Phase:      string(st.Phase),
+					PlanID:     planID,
+					ErrorCode:  errCode,
+					Error:      rejectErrMsg,
+					ThreadID:   threadID,
+					TurnID:     interruptTurnID,
+					Step:       st.Run.LastFailedStep,
+					EngineMode: st.Run.EngineMode,
+				})
+				return "", 0, errors.New(rejectErrMsg)
+			}
 		}
 		st.Run.ActiveTurnID = ""
 		errCode := "E_RUN_REJECTED"
@@ -1677,25 +1769,32 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 				lastTurnID = strings.TrimSpace(st.Run.TurnHistory[len(st.Run.TurnHistory)-1].TurnID)
 			}
 			if lastTurnID != "" {
+				callCtx, cancel := newCodexRPCCallContext(codexCfg.Timeout)
 				turn, turnErr = engine.SteerTurn(callCtx, threadID, lastTurnID, strings.TrimSpace(opts.steerText))
+				cancel()
 			} else {
+				callCtx, cancel := newCodexRPCCallContext(codexCfg.Timeout)
 				turn, turnErr = engine.RunTurn(callCtx, threadID, prompt+"\n\nsteer_instruction: "+strings.TrimSpace(opts.steerText))
+				cancel()
 			}
 		} else {
 			// Use streaming path for last step in real mode, otherwise simple RunTurn.
 			if i == len(stepTurn)-1 && strings.EqualFold(st.Run.EngineMode, "real") {
+				callCtx, cancel := newCodexRPCCallContext(codexCfg.Timeout)
 				events, streamErr := engine.StreamTurn(callCtx, threadID, prompt)
 				if streamErr != nil {
+					cancel()
 					turnErr = streamErr
 				} else {
-					lastTurnID := ""
-					for evt := range events {
-						if strings.TrimSpace(evt.TurnID) != "" {
-							lastTurnID = strings.TrimSpace(evt.TurnID)
-						}
+					cancel()
+					summary, consumeErr := consumeRunStreamEvents(base, st, planID, step.Step, threadID, events)
+					if consumeErr != nil {
+						turnErr = consumeErr
 					}
+					streamDeltaEvents += summary.DeltaEvents
+					streamCompletedEvents += summary.CompletedEvents
 					turn = &codex.Turn{
-						ID:        lastTurnID,
+						ID:        summary.LastTurnID,
 						ThreadID:  threadID,
 						Role:      "assistant",
 						Content:   "stream:completed",
@@ -1703,7 +1802,9 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 					}
 				}
 			} else {
+				callCtx, cancel := newCodexRPCCallContext(codexCfg.Timeout)
 				turn, turnErr = engine.RunTurn(callCtx, threadID, prompt)
+				cancel()
 			}
 		}
 		if turnErr != nil {
@@ -1853,7 +1954,7 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 			EngineMode: st.Run.EngineMode,
 		})
 	}
-	startTurnID, endTurnID = firstLastTurnID(stepTurn)
+	_, endTurnID = firstLastTurnID(stepTurn)
 
 	pendingContext := []string{
 		filepath.ToSlash(filepath.Join(".ax", "runs", runName)),
@@ -1889,6 +1990,8 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 	report.WriteString(fmt.Sprintf("- decision: %s\n", decision))
 	report.WriteString(fmt.Sprintf("- retry_limit: %d\n", retryLimit))
 	report.WriteString(fmt.Sprintf("- retry_attempts: %d\n", st.Run.RetryAttempts))
+	report.WriteString(fmt.Sprintf("- stream_delta_events: %d\n", streamDeltaEvents))
+	report.WriteString(fmt.Sprintf("- stream_completed_events: %d\n", streamCompletedEvents))
 	if decision == "steer" {
 		report.WriteString(fmt.Sprintf("- steer_instruction: %s\n", strings.TrimSpace(opts.steerText)))
 	}
@@ -1944,6 +2047,9 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 			report.WriteString(fmt.Sprintf("| %s | %s | %s |\n", item.Step, item.TurnID, emptyFallback(item.Tier)))
 		}
 	}
+	report.WriteString("\n## Streaming Summary\n")
+	report.WriteString(fmt.Sprintf("- delta_events: %d\n", streamDeltaEvents))
+	report.WriteString(fmt.Sprintf("- completed_events: %d\n", streamCompletedEvents))
 	report.WriteString("\n## Status\n- status: completed\n")
 
 	if err := os.WriteFile(runPath, []byte(report.String()), 0o644); err != nil {
@@ -2760,6 +2866,13 @@ func syntheticThreadID(planID string) string {
 	return "thread-" + sanitizeToken(planID)
 }
 
+func newCodexRPCCallContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(context.Background(), timeout)
+	}
+	return context.WithCancel(context.Background())
+}
+
 func buildStepTurnMappings(taskCount int, tdd bool, state core.TDDState) []stepTurnMapping {
 	if tdd {
 		tier := strings.ToUpper(strings.TrimSpace(state.CurrentTier))
@@ -3203,6 +3316,41 @@ func proposalID(title string, now time.Time) string {
 	return ts + "-" + sanitizeToken(title)
 }
 
+func canonicalizeScopedPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	abs = filepath.Clean(abs)
+	eval, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return filepath.Clean(eval), nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return abs, nil
+	}
+	return "", err
+}
+
+func enforcePathWithinBase(base, candidate string) (string, error) {
+	basePath, err := canonicalizeScopedPath(base)
+	if err != nil {
+		return "", err
+	}
+	candidatePath, err := canonicalizeScopedPath(candidate)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(basePath, candidatePath)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("AX_INPUT_PATH_OUT_OF_SCOPE: %s (base=%s)", filepath.ToSlash(candidatePath), filepath.ToSlash(basePath))
+	}
+	return candidatePath, nil
+}
+
 func resolveProposal(base, proposal string) (dir string, id string, err error) {
 	proposal = strings.TrimSpace(proposal)
 	if proposal == "" {
@@ -3214,12 +3362,20 @@ func resolveProposal(base, proposal string) (dir string, id string, err error) {
 		if !filepath.IsAbs(candidate) {
 			candidate = filepath.Join(base, candidate)
 		}
+		candidate, err = enforcePathWithinBase(base, candidate)
+		if err != nil {
+			return "", "", err
+		}
 		info, err := os.Stat(candidate)
 		if err != nil {
 			return "", "", err
 		}
 		if !info.IsDir() {
 			candidate = filepath.Dir(candidate)
+			candidate, err = enforcePathWithinBase(base, candidate)
+			if err != nil {
+				return "", "", err
+			}
 		}
 		if _, err := os.Stat(filepath.Join(candidate, "proposal.md")); err != nil {
 			return "", "", fmt.Errorf("proposal path must include proposal.md: %w", err)
@@ -3228,6 +3384,10 @@ func resolveProposal(base, proposal string) (dir string, id string, err error) {
 	}
 
 	dir = filepath.Join(base, ".ax", "proposals", proposal)
+	dir, err = enforcePathWithinBase(base, dir)
+	if err != nil {
+		return "", "", err
+	}
 	if _, err := os.Stat(dir); err != nil {
 		return "", "", err
 	}
@@ -3239,11 +3399,16 @@ func resolveArchivedProposal(base, proposal string) (dir string, id string, ok b
 	if proposal == "" {
 		return "", "", false
 	}
+	var err error
 
 	if filepath.IsAbs(proposal) || strings.Contains(proposal, string(os.PathSeparator)) {
 		candidate := proposal
 		if !filepath.IsAbs(candidate) {
 			candidate = filepath.Join(base, candidate)
+		}
+		candidate, err = enforcePathWithinBase(base, candidate)
+		if err != nil {
+			return "", "", false
 		}
 		info, err := os.Stat(candidate)
 		if err != nil {
@@ -3251,6 +3416,10 @@ func resolveArchivedProposal(base, proposal string) (dir string, id string, ok b
 		}
 		if !info.IsDir() {
 			candidate = filepath.Dir(candidate)
+			candidate, err = enforcePathWithinBase(base, candidate)
+			if err != nil {
+				return "", "", false
+			}
 		}
 		if _, err := os.Stat(filepath.Join(candidate, "archive-metadata.yaml")); err != nil {
 			return "", "", false
@@ -3259,6 +3428,10 @@ func resolveArchivedProposal(base, proposal string) (dir string, id string, ok b
 	}
 
 	candidate := filepath.Join(base, ".ax", "archive", proposal)
+	candidate, err = enforcePathWithinBase(base, candidate)
+	if err != nil {
+		return "", "", false
+	}
 	if _, err := os.Stat(filepath.Join(candidate, "archive-metadata.yaml")); err != nil {
 		return "", "", false
 	}
@@ -3270,12 +3443,24 @@ func resolvePlan(base, plan string) (path string, id string, err error) {
 		return "", "", errors.New("plan is required")
 	}
 	if filepath.IsAbs(plan) || strings.Contains(plan, string(os.PathSeparator)) {
-		if _, err := os.Stat(plan); err != nil {
+		candidate := plan
+		if !filepath.IsAbs(candidate) {
+			candidate = filepath.Join(base, candidate)
+		}
+		candidate, err = enforcePathWithinBase(base, candidate)
+		if err != nil {
 			return "", "", err
 		}
-		return plan, strings.TrimSuffix(filepath.Base(plan), filepath.Ext(plan)), nil
+		if _, err := os.Stat(candidate); err != nil {
+			return "", "", err
+		}
+		return candidate, strings.TrimSuffix(filepath.Base(candidate), filepath.Ext(candidate)), nil
 	}
 	path = filepath.Join(base, ".ax", "plans", plan)
+	path, err = enforcePathWithinBase(base, path)
+	if err != nil {
+		return "", "", err
+	}
 	if _, err := os.Stat(path); err != nil {
 		return "", "", err
 	}

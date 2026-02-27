@@ -146,10 +146,26 @@ func TestHelperProcessCodexServer(t *testing.T) {
 	}
 
 	switch req.Method {
-	case "CreateThread":
+	case "thread/start":
 		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Thread{ID: "th-1", Title: "hello", CreatedAt: "2026-02-26T00:00:00Z"}})
-	case "RunTurn":
+	case "turn/start":
 		params, _ := req.Params.(map[string]any)
+		if stream, _ := params["stream"].(bool); stream {
+			prompt, _ := params["prompt"].(string)
+			if prompt == "stream-no-complete" {
+				events := []StreamEvent{
+					{Type: "delta", ThreadID: "th-1", TurnID: "tu-3", Delta: "partial"},
+				}
+				write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: events})
+				os.Exit(0)
+			}
+			events := []StreamEvent{
+				{Type: "delta", ThreadID: "th-1", TurnID: "tu-3", Delta: "Hello"},
+				{Type: "completed", ThreadID: "th-1", TurnID: "tu-3", Completed: true},
+			}
+			write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: events})
+			os.Exit(0)
+		}
 		prompt, _ := params["prompt"].(string)
 		if prompt == "force-error" {
 			write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &JSONRPCErrorObj{Code: 500, Message: "boom"}})
@@ -160,33 +176,18 @@ func TestHelperProcessCodexServer(t *testing.T) {
 			os.Exit(0)
 		}
 		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Turn{ID: "tu-1", ThreadID: "th-1", Role: "assistant", Content: "ok:" + prompt, CreatedAt: "2026-02-26T00:00:01Z"}})
-	case "GetThread":
+	case "thread/read":
 		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Thread{ID: "th-1", Title: "hello", CreatedAt: "2026-02-26T00:00:00Z"}})
-	case "ResumeSession":
+	case "thread/resume":
 		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Thread{ID: "th-1", Title: "resumed", CreatedAt: "2026-02-26T00:00:00Z"}})
-	case "ForkSession":
+	case "thread/fork":
 		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Thread{ID: "th-2", Title: "fork", CreatedAt: "2026-02-26T00:00:02Z"}})
-	case "RollbackTurns":
+	case "thread/rollback":
 		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Thread{ID: "th-1", Title: "rolled back", CreatedAt: "2026-02-26T00:00:03Z"}})
-	case "SteerTurn":
+	case "review/start":
 		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Turn{ID: "tu-2", ThreadID: "th-1", Role: "assistant", Content: "steered", CreatedAt: "2026-02-26T00:00:04Z"}})
-	case "InterruptTurn":
+	case "turn/interrupt":
 		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"interrupted": true}})
-	case "RunTurnStream":
-		params, _ := req.Params.(map[string]any)
-		prompt, _ := params["prompt"].(string)
-		if prompt == "stream-no-complete" {
-			events := []StreamEvent{
-				{Type: "delta", ThreadID: "th-1", TurnID: "tu-3", Delta: "partial"},
-			}
-			write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: events})
-			os.Exit(0)
-		}
-		events := []StreamEvent{
-			{Type: "delta", ThreadID: "th-1", TurnID: "tu-3", Delta: "Hello"},
-			{Type: "completed", ThreadID: "th-1", TurnID: "tu-3", Completed: true},
-		}
-		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: events})
 	default:
 		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &JSONRPCErrorObj{Code: -32601, Message: "method not found"}})
 	}

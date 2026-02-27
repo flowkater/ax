@@ -32,6 +32,17 @@ type StdioClient struct {
 	backoff []time.Duration
 }
 
+const (
+	rpcMethodThreadStart    = "thread/start"
+	rpcMethodThreadRead     = "thread/read"
+	rpcMethodThreadResume   = "thread/resume"
+	rpcMethodThreadFork     = "thread/fork"
+	rpcMethodThreadRollback = "thread/rollback"
+	rpcMethodTurnStart      = "turn/start"
+	rpcMethodTurnInterrupt  = "turn/interrupt"
+	rpcMethodReviewStart    = "review/start"
+)
+
 func NewStdioClient(command string, args ...string) *StdioClient {
 	return &StdioClient{
 		command: command,
@@ -44,7 +55,7 @@ func NewStdioClient(command string, args ...string) *StdioClient {
 
 func (c *StdioClient) CreateThread(ctx context.Context, title string) (*Thread, error) {
 	var out Thread
-	if err := c.call(ctx, "CreateThread", map[string]any{"title": title}, &out); err != nil {
+	if err := c.call(ctx, rpcMethodThreadStart, map[string]any{"title": title}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -52,7 +63,7 @@ func (c *StdioClient) CreateThread(ctx context.Context, title string) (*Thread, 
 
 func (c *StdioClient) RunTurn(ctx context.Context, threadID, prompt string) (*Turn, error) {
 	var out Turn
-	if err := c.call(ctx, "RunTurn", map[string]any{"thread_id": threadID, "prompt": prompt}, &out); err != nil {
+	if err := c.call(ctx, rpcMethodTurnStart, map[string]any{"thread_id": threadID, "prompt": prompt}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -60,7 +71,7 @@ func (c *StdioClient) RunTurn(ctx context.Context, threadID, prompt string) (*Tu
 
 func (c *StdioClient) GetThread(ctx context.Context, threadID string) (*Thread, error) {
 	var out Thread
-	if err := c.call(ctx, "GetThread", map[string]any{"thread_id": threadID}, &out); err != nil {
+	if err := c.call(ctx, rpcMethodThreadRead, map[string]any{"thread_id": threadID}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -68,7 +79,7 @@ func (c *StdioClient) GetThread(ctx context.Context, threadID string) (*Thread, 
 
 func (c *StdioClient) ResumeSession(ctx context.Context, threadID string) (*Thread, error) {
 	var out Thread
-	if err := c.call(ctx, "ResumeSession", map[string]any{"thread_id": threadID}, &out); err != nil {
+	if err := c.call(ctx, rpcMethodThreadResume, map[string]any{"thread_id": threadID}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -76,7 +87,7 @@ func (c *StdioClient) ResumeSession(ctx context.Context, threadID string) (*Thre
 
 func (c *StdioClient) ForkSession(ctx context.Context, threadID string) (*Thread, error) {
 	var out Thread
-	if err := c.call(ctx, "ForkSession", map[string]any{"thread_id": threadID}, &out); err != nil {
+	if err := c.call(ctx, rpcMethodThreadFork, map[string]any{"thread_id": threadID}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -84,7 +95,7 @@ func (c *StdioClient) ForkSession(ctx context.Context, threadID string) (*Thread
 
 func (c *StdioClient) RollbackTurns(ctx context.Context, threadID, toTurnID string) (*Thread, error) {
 	var out Thread
-	if err := c.call(ctx, "RollbackTurns", map[string]any{"thread_id": threadID, "to_turn_id": toTurnID}, &out); err != nil {
+	if err := c.call(ctx, rpcMethodThreadRollback, map[string]any{"thread_id": threadID, "to_turn_id": toTurnID}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -97,7 +108,7 @@ func (c *StdioClient) SteerTurn(ctx context.Context, threadID, turnID, instructi
 		"turn_id":     turnID,
 		"instruction": instruction,
 	}
-	if err := c.call(ctx, "SteerTurn", params, &out); err != nil {
+	if err := c.call(ctx, rpcMethodReviewStart, params, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -105,7 +116,7 @@ func (c *StdioClient) SteerTurn(ctx context.Context, threadID, turnID, instructi
 
 func (c *StdioClient) InterruptTurn(ctx context.Context, threadID, turnID string) (*InterruptResult, error) {
 	var out InterruptResult
-	if err := c.call(ctx, "InterruptTurn", map[string]any{"thread_id": threadID, "turn_id": turnID}, &out); err != nil {
+	if err := c.call(ctx, rpcMethodTurnInterrupt, map[string]any{"thread_id": threadID, "turn_id": turnID}, &out); err != nil {
 		return nil, err
 	}
 	if !out.Interrupted {
@@ -116,7 +127,7 @@ func (c *StdioClient) InterruptTurn(ctx context.Context, threadID, turnID string
 
 func (c *StdioClient) StreamTurn(ctx context.Context, threadID, prompt string) (<-chan StreamEvent, error) {
 	var events []StreamEvent
-	if err := c.call(ctx, "RunTurnStream", map[string]any{"thread_id": threadID, "prompt": prompt}, &events); err != nil {
+	if err := c.call(ctx, rpcMethodTurnStart, map[string]any{"thread_id": threadID, "prompt": prompt, "stream": true}, &events); err != nil {
 		return nil, err
 	}
 	events = normalizeStreamEvents(events, threadID)

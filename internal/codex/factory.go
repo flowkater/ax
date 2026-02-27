@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -34,10 +35,7 @@ func ResolveConfig() ClientConfig {
 	}
 
 	if v := strings.TrimSpace(os.Getenv("AX_CODEX_MODE")); v != "" {
-		switch strings.ToLower(v) {
-		case "real", "scaffold":
-			cfg.Mode = strings.ToLower(v)
-		}
+		cfg.Mode = strings.ToLower(v)
 	}
 	if v := strings.TrimSpace(os.Getenv("AX_CODEX_BIN")); v != "" {
 		cfg.BinPath = v
@@ -64,8 +62,13 @@ func NewAdapter(cfg ClientConfig) (AppServerAdapter, error) {
 	if mode == "" {
 		mode = DefaultMode
 	}
-	if mode != "real" {
+	switch mode {
+	case "scaffold":
 		return NewScaffoldAdapter(), nil
+	case "real":
+		// continue
+	default:
+		return nil, fmt.Errorf("AX_ENGINE_CONFIG_INVALID: AX_CODEX_MODE must be real|scaffold (got %q)", mode)
 	}
 
 	bin := strings.TrimSpace(cfg.BinPath)

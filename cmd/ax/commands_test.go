@@ -2,7 +2,9 @@ package ax
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +16,14 @@ import (
 	"github.com/flowkater/ax/internal/codex"
 	"github.com/flowkater/ax/internal/core"
 )
+
+type interruptFailingAdapter struct {
+	codex.AppServerAdapter
+}
+
+func (a interruptFailingAdapter) InterruptTurn(_ context.Context, _, _ string) (*codex.InterruptResult, error) {
+	return nil, errors.New("interrupt downstream failed")
+}
 
 func TestProposeCreatesRequiredSectionsAndStateContext(t *testing.T) {
 	tmp := setupTempCWD(t)
@@ -113,6 +123,29 @@ func TestPlanAcceptsProposalPathInput(t *testing.T) {
 	state := readState(t, tmp)
 	if state.Current.Proposal != proposalID {
 		t.Fatalf("expected current proposal %q, got %q", proposalID, state.Current.Proposal)
+	}
+}
+
+func TestPlanRejectsProposalPathOutsideBase(t *testing.T) {
+	tmp := setupTempCWD(t)
+
+	outside := t.TempDir()
+	escapeProposalDir := filepath.Join(outside, "escape-proposal")
+	if err := os.MkdirAll(escapeProposalDir, 0o755); err != nil {
+		t.Fatalf("mkdir escape proposal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(escapeProposalDir, "proposal.md"), []byte("# Proposal"), 0o644); err != nil {
+		t.Fatalf("write escape proposal: %v", err)
+	}
+	relEscapePath, err := filepath.Rel(tmp, filepath.Join(escapeProposalDir, "proposal.md"))
+	if err != nil {
+		t.Fatalf("relative escape path: %v", err)
+	}
+
+	if _, err := executeAX(t, "plan", "--from", relEscapePath); err == nil {
+		t.Fatal("expected plan to reject proposal path outside base")
+	} else if !strings.Contains(err.Error(), "AX_INPUT_PATH_OUT_OF_SCOPE") {
+		t.Fatalf("expected AX_INPUT_PATH_OUT_OF_SCOPE, got: %v", err)
 	}
 }
 
@@ -1026,6 +1059,73 @@ func TestRunDecisionRejectStoresFailure(t *testing.T) {
 	}
 }
 
+func TestRunDecisionRejectPropagatesInterruptFailure(t *testing.T) {
+	tmp := setupTempCWD(t)
+
+	if _, err := executeAX(t, "propose", "Reject Interrupt Failure"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+
+	adapter := interruptFailingAdapter{AppServerAdapter: codex.NewScaffoldAdapter()}
+	if _, err := adapter.InterruptTurn(context.Background(), "th", "tu"); err == nil {
+		t.Fatal("test adapter should fail interrupt")
+	}
+	_, _, err := runPlan(tmp, planName, runOptions{
+		decision: "reject",
+		approval: "never",
+		retry:    -1,
+	}, runtimeContext{
+		mode:      core.RuntimeModeSingle,
+		sessionID: "sess-reject-interrupt-fail",
+		clusterID: "cluster-test",
+		nodeID:    "node-test",
+	}, adapter, codex.ClientConfig{
+		Mode:    "real",
+		Timeout: 5 * time.Second,
+		Retries: 0,
+	}, time.Now())
+	if err == nil {
+		t.Fatal("expected reject interrupt failure to be surfaced")
+	}
+	if !strings.Contains(err.Error(), "reject interrupt failed") {
+		t.Fatalf("expected reject interrupt failure message, got: %v", err)
+	}
+
+	state := readState(t, tmp)
+	if state.LastError == nil || state.LastError.Code == "" {
+		t.Fatalf("expected mapped last error, got %+v", state.LastError)
+	}
+	if state.Run.LastFailedStep != "decision:reject:interrupt" {
+		t.Fatalf("expected interrupt failed step tracking, got %+v", state.Run)
+	}
+
+	logEntries, err := os.ReadDir(filepath.Join(tmp, ".ax", "logs"))
+	if err != nil {
+		t.Fatalf("read logs: %v", err)
+	}
+	foundObs := false
+	for _, entry := range logEntries {
+		body := mustRead(t, filepath.Join(tmp, ".ax", "logs", entry.Name()))
+		if strings.Contains(body, "step: run_reject_interrupt_failed") {
+			foundObs = true
+			break
+		}
+	}
+	if !foundObs {
+		t.Fatal("expected run_reject_interrupt_failed observability log entry")
+	}
+
+	journal := mustRead(t, filepath.Join(tmp, ".ax", "logs", "runtime-journal.jsonl"))
+	if !strings.Contains(journal, "\"step\":\"decision:reject:interrupt\"") {
+		t.Fatalf("expected runtime journal interrupt failure step, got:\n%s", journal)
+	}
+}
+
 func TestRunNoWorktreeDisablesCreation(t *testing.T) {
 	tmp := setupTempCWD(t)
 	if _, err := executeAX(t, "propose", "No Worktree Flow"); err != nil {
@@ -1431,6 +1531,45 @@ func TestRunRetryOverrideValidation(t *testing.T) {
 	}
 }
 
+func TestRunRejectsPlanPathOutsideBase(t *testing.T) {
+	tmp := setupTempCWD(t)
+
+	outside := t.TempDir()
+	escapePlanPath := filepath.Join(outside, "escape-plan.md")
+	if err := os.WriteFile(escapePlanPath, []byte("# Plan\n\n- [ ] escape\n"), 0o644); err != nil {
+		t.Fatalf("write escape plan: %v", err)
+	}
+	relEscapePath, err := filepath.Rel(tmp, escapePlanPath)
+	if err != nil {
+		t.Fatalf("relative escape path: %v", err)
+	}
+
+	if _, err := executeAX(t, "run", "--plan", relEscapePath); err == nil {
+		t.Fatal("expected run to reject out-of-scope plan path")
+	} else if !strings.Contains(err.Error(), "AX_INPUT_PATH_OUT_OF_SCOPE") {
+		t.Fatalf("expected AX_INPUT_PATH_OUT_OF_SCOPE, got: %v", err)
+	}
+}
+
+func TestRunFailsOnInvalidCodexMode(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_CODEX_MODE", "invalid-mode")
+	if _, err := executeAX(t, "propose", "Invalid Codex Mode"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+
+	if _, err := executeAX(t, "run", "--plan", planName); err == nil {
+		t.Fatal("expected run to fail on invalid AX_CODEX_MODE")
+	} else if !strings.Contains(err.Error(), "AX_ENGINE_CONFIG_INVALID") {
+		t.Fatalf("expected AX_ENGINE_CONFIG_INVALID, got: %v", err)
+	}
+}
+
 func TestTUISnapshotAndGuardedAction(t *testing.T) {
 	setupTempCWD(t)
 	if _, err := executeAX(t, "state"); err != nil {
@@ -1464,6 +1603,210 @@ func TestTUISnapshotAndGuardedAction(t *testing.T) {
 	}
 	if !strings.Contains(actionOut, "tui: action=retry confirmed") {
 		t.Fatalf("unexpected tui action output: %s", actionOut)
+	}
+}
+
+func TestRunRealModeStreamingSummaryAndJournal(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_CODEX_MODE", "real")
+	t.Setenv("AX_CODEX_BIN", os.Args[0])
+	t.Setenv("AX_CODEX_ARGS", "-test.run=TestHelperProcessCodexServerAX")
+	t.Setenv("AX_CODEX_TIMEOUT", "5s")
+	t.Setenv("AX_CODEX_RETRIES", "0")
+	t.Setenv("GO_WANT_HELPER_PROCESS_AX", "1")
+
+	if _, err := executeAX(t, "propose", "Streaming Summary"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "run", "--plan", planName); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	runName := singleEntryName(t, filepath.Join(tmp, ".ax", "runs"))
+	runBody := mustRead(t, filepath.Join(tmp, ".ax", "runs", runName))
+	for _, want := range []string{
+		"- stream_delta_events: 1",
+		"- stream_completed_events: 1",
+		"## Streaming Summary",
+		"- delta_events: 1",
+		"- completed_events: 1",
+	} {
+		if !strings.Contains(runBody, want) {
+			t.Fatalf("run report missing %q:\n%s", want, runBody)
+		}
+	}
+
+	journal := mustRead(t, filepath.Join(tmp, ".ax", "logs", "runtime-journal.jsonl"))
+	if !strings.Contains(journal, "\"stage\":\"stream_delta\"") {
+		t.Fatalf("expected stream_delta runtime journal entry, got:\n%s", journal)
+	}
+	if !strings.Contains(journal, "\"stage\":\"stream_completed\"") {
+		t.Fatalf("expected stream_completed runtime journal entry, got:\n%s", journal)
+	}
+}
+
+func TestTUIActionSteerUpdatesStateWithEngineCall(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_CODEX_MODE", "real")
+	t.Setenv("AX_CODEX_BIN", os.Args[0])
+	t.Setenv("AX_CODEX_ARGS", "-test.run=TestHelperProcessCodexServerAX")
+	t.Setenv("AX_CODEX_TIMEOUT", "5s")
+	t.Setenv("AX_CODEX_RETRIES", "0")
+	t.Setenv("GO_WANT_HELPER_PROCESS_AX", "1")
+
+	if _, err := executeAX(t, "propose", "TUI Steer Sync"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "run", "--plan", planName, "--tdd"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	before := readState(t, tmp)
+	beforeLen := len(before.Run.TurnHistory)
+	if beforeLen == 0 {
+		t.Fatalf("expected existing turn history before steer action")
+	}
+
+	if _, err := executeAX(t, "tui", "--action", "steer", "--confirm"); err != nil {
+		t.Fatalf("tui steer action: %v", err)
+	}
+
+	after := readState(t, tmp)
+	if len(after.Run.TurnHistory) != beforeLen+1 {
+		t.Fatalf("expected steer action to append history (%d -> %d), got %+v", beforeLen, beforeLen+1, after.Run.TurnHistory)
+	}
+	last := after.Run.TurnHistory[len(after.Run.TurnHistory)-1]
+	if last.Step != "tui:steered" || last.Status != "steered" {
+		t.Fatalf("expected steered turn ref, got %+v", last)
+	}
+	if after.Run.ActiveTurnID != "" {
+		t.Fatalf("expected active turn cleared after steer action, got %q", after.Run.ActiveTurnID)
+	}
+
+	journal := mustRead(t, filepath.Join(tmp, ".ax", "logs", "runtime-journal.jsonl"))
+	if !strings.Contains(journal, "\"command\":\"tui\"") || !strings.Contains(journal, "\"artifact\":\"steer\"") {
+		t.Fatalf("expected tui steer journal entry, got:\n%s", journal)
+	}
+}
+
+func TestTUIActionInterruptFailureSetsMappedError(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_CODEX_MODE", "real")
+	t.Setenv("AX_CODEX_BIN", os.Args[0])
+	t.Setenv("AX_CODEX_ARGS", "-test.run=TestHelperProcessCodexServerAX")
+	t.Setenv("AX_CODEX_TIMEOUT", "5s")
+	t.Setenv("AX_CODEX_RETRIES", "0")
+	t.Setenv("AX_TEST_INTERRUPT_FAIL", "1")
+	t.Setenv("GO_WANT_HELPER_PROCESS_AX", "1")
+
+	if _, err := executeAX(t, "propose", "TUI Interrupt Failure"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "run", "--plan", planName); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	st := readState(t, tmp)
+	if len(st.Run.TurnHistory) == 0 {
+		t.Fatalf("expected turn history for interrupt action")
+	}
+	st.Run.ActiveTurnID = st.Run.TurnHistory[len(st.Run.TurnHistory)-1].TurnID
+	if err := core.SaveState(tmp, st); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	if _, err := executeAX(t, "tui", "--action", "interrupt", "--confirm"); err == nil {
+		t.Fatal("expected interrupt action to fail")
+	} else if !strings.Contains(err.Error(), "interrupt failed") {
+		t.Fatalf("expected interrupt failure message, got %v", err)
+	}
+
+	after := readState(t, tmp)
+	if after.LastError == nil || after.LastError.Code == "" {
+		t.Fatalf("expected mapped last error, got %+v", after.LastError)
+	}
+	if after.Run.ErrorCode == "" || after.Run.ErrorSummary == "" {
+		t.Fatalf("expected run error metadata populated, got %+v", after.Run)
+	}
+
+	journal := mustRead(t, filepath.Join(tmp, ".ax", "logs", "runtime-journal.jsonl"))
+	if !strings.Contains(journal, "\"stage\":\"action_failed\"") || !strings.Contains(journal, "\"artifact\":\"interrupt\"") {
+		t.Fatalf("expected tui interrupt failure journal entry, got:\n%s", journal)
+	}
+}
+
+func TestTUIActionForkAndRollbackSynchronizeEngineState(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_CODEX_MODE", "real")
+	t.Setenv("AX_CODEX_BIN", os.Args[0])
+	t.Setenv("AX_CODEX_ARGS", "-test.run=TestHelperProcessCodexServerAX")
+	t.Setenv("AX_CODEX_TIMEOUT", "5s")
+	t.Setenv("AX_CODEX_RETRIES", "0")
+	t.Setenv("GO_WANT_HELPER_PROCESS_AX", "1")
+
+	if _, err := executeAX(t, "propose", "TUI Fork Rollback"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "run", "--plan", planName, "--tdd"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	beforeFork := readState(t, tmp)
+	originalThreadID := beforeFork.Run.ThreadID
+	if originalThreadID == "" {
+		t.Fatalf("expected thread id before fork")
+	}
+	if _, err := executeAX(t, "tui", "--action", "fork", "--confirm"); err != nil {
+		t.Fatalf("tui fork action: %v", err)
+	}
+	afterFork := readState(t, tmp)
+	if afterFork.Run.ThreadID == originalThreadID {
+		t.Fatalf("expected fork to update thread id (%q -> %q)", originalThreadID, afterFork.Run.ThreadID)
+	}
+
+	if len(afterFork.Run.TurnHistory) < 2 {
+		t.Fatalf("expected 2+ turns before rollback trim, got %+v", afterFork.Run.TurnHistory)
+	}
+	targetTurnID := afterFork.Run.TurnHistory[0].TurnID
+	afterFork.Run.ActiveTurnID = targetTurnID
+	if err := core.SaveState(tmp, afterFork); err != nil {
+		t.Fatalf("save state before rollback: %v", err)
+	}
+
+	if _, err := executeAX(t, "tui", "--action", "rollback", "--confirm"); err != nil {
+		t.Fatalf("tui rollback action: %v", err)
+	}
+	afterRollback := readState(t, tmp)
+	if len(afterRollback.Run.TurnHistory) != 1 {
+		t.Fatalf("expected rollback to trim turn history to 1, got %+v", afterRollback.Run.TurnHistory)
+	}
+	if afterRollback.Run.TurnHistory[0].TurnID != targetTurnID {
+		t.Fatalf("expected rollback to keep target turn %q, got %+v", targetTurnID, afterRollback.Run.TurnHistory)
+	}
+
+	journal := mustRead(t, filepath.Join(tmp, ".ax", "logs", "runtime-journal.jsonl"))
+	if !strings.Contains(journal, "\"artifact\":\"fork\"") || !strings.Contains(journal, "\"artifact\":\"rollback\"") {
+		t.Fatalf("expected fork/rollback journal entries, got:\n%s", journal)
 	}
 }
 
@@ -1715,6 +2058,36 @@ func TestRunPersistsTurnHistoryAfterEachTurn(t *testing.T) {
 	}
 }
 
+func TestRunRealModeUsesPerRPCTimeoutContext(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_CODEX_MODE", "real")
+	t.Setenv("AX_CODEX_BIN", os.Args[0])
+	t.Setenv("AX_CODEX_ARGS", "-test.run=TestHelperProcessCodexServerAX")
+	t.Setenv("AX_CODEX_TIMEOUT", "2s")
+	t.Setenv("AX_CODEX_RETRIES", "0")
+	t.Setenv("AX_TEST_DELAY_ALL_TURN_MILLIS", "900")
+	t.Setenv("GO_WANT_HELPER_PROCESS_AX", "1")
+
+	if _, err := executeAX(t, "propose", "Codex Per-RPC Timeout"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "run", "--plan", planName, "--tdd"); err != nil {
+		t.Fatalf("run with per-rpc timeout should succeed: %v", err)
+	}
+	st := readState(t, tmp)
+	if len(st.Run.TurnHistory) != 3 {
+		t.Fatalf("expected 3 TDD turns, got %d (%+v)", len(st.Run.TurnHistory), st.Run.TurnHistory)
+	}
+	if st.Run.ErrorCode != "" {
+		t.Fatalf("expected cleared run error after success, got %q", st.Run.ErrorCode)
+	}
+}
+
 func TestHelperProcessCodexServerAX(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS_AX") != "1" {
 		return
@@ -1735,12 +2108,19 @@ func TestHelperProcessCodexServerAX(t *testing.T) {
 	emptyThreadID := os.Getenv("AX_TEST_EMPTY_THREAD_ID") == "1"
 	emptyTurnID := os.Getenv("AX_TEST_EMPTY_TURN_ID") == "1"
 	emptyTurnStep := strings.TrimSpace(os.Getenv("AX_TEST_EMPTY_TURN_STEP"))
+	interruptFail := os.Getenv("AX_TEST_INTERRUPT_FAIL") == "1"
 	delayStep := strings.TrimSpace(os.Getenv("AX_TEST_DELAY_STEP"))
 	delayReqID := strings.TrimSpace(os.Getenv("AX_TEST_DELAY_REQ_ID"))
 	delayMillis := 0
 	if raw := strings.TrimSpace(os.Getenv("AX_TEST_DELAY_MILLIS")); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
 			delayMillis = parsed
+		}
+	}
+	delayAllTurnMillis := 0
+	if raw := strings.TrimSpace(os.Getenv("AX_TEST_DELAY_ALL_TURN_MILLIS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			delayAllTurnMillis = parsed
 		}
 	}
 	shouldApplyToPrompt := func(prompt, marker string) bool {
@@ -1751,51 +2131,70 @@ func TestHelperProcessCodexServerAX(t *testing.T) {
 	}
 
 	switch req.Method {
-	case "CreateThread":
+	case "thread/start":
 		threadID := "th-real-1"
 		if emptyThreadID {
 			threadID = ""
 		}
 		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: threadID, Title: "real", CreatedAt: "2026-02-26T00:00:00Z"}})
-	case "ResumeSession":
+	case "thread/resume":
 		threadID := "th-real-1"
 		if emptyThreadID {
 			threadID = ""
 		}
 		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: threadID, Title: "resumed", CreatedAt: "2026-02-26T00:00:01Z"}})
-	case "GetThread":
+	case "thread/read":
 		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: "th-real-1", Title: "health", CreatedAt: "2026-02-26T00:00:02Z"}})
-	case "RunTurn":
+	case "thread/fork":
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: "th-real-fork-1", Title: "forked", CreatedAt: "2026-02-26T00:00:02Z"}})
+	case "thread/rollback":
+		params, _ := req.Params.(map[string]any)
+		threadID, _ := params["thread_id"].(string)
+		if strings.TrimSpace(threadID) == "" {
+			threadID = "th-real-1"
+		}
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: threadID, Title: "rolled-back", CreatedAt: "2026-02-26T00:00:02Z"}})
+	case "turn/start":
 		params, _ := req.Params.(map[string]any)
 		prompt, _ := params["prompt"].(string)
+		stream, _ := params["stream"].(bool)
+		if delayAllTurnMillis > 0 {
+			time.Sleep(time.Duration(delayAllTurnMillis) * time.Millisecond)
+		}
 		if delayMillis > 0 && ((delayReqID != "" && req.ID == delayReqID) || shouldApplyToPrompt(prompt, delayStep)) {
 			time.Sleep(time.Duration(delayMillis) * time.Millisecond)
 		}
-		turnID := "tu-run-1"
+		if stream {
+			turnID := "tu-stream-" + req.ID
+			if emptyTurnID {
+				turnID = ""
+			}
+			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: []codex.StreamEvent{
+				{Type: codex.StreamEventDelta, ThreadID: "th-real-1", TurnID: turnID, Delta: "hello"},
+				{Type: codex.StreamEventCompleted, ThreadID: "th-real-1", TurnID: turnID, Completed: true},
+			}})
+			break
+		}
+		turnID := "tu-run-" + req.ID
 		if strings.Contains(prompt, "steer_instruction:") {
-			turnID = "tu-steer-bootstrap-1"
+			turnID = "tu-steer-bootstrap-" + req.ID
 		}
 		if emptyTurnID || shouldApplyToPrompt(prompt, emptyTurnStep) {
 			turnID = ""
 		}
 		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Turn{ID: turnID, ThreadID: "th-real-1", Role: "assistant", Content: "ok", CreatedAt: "2026-02-26T00:00:03Z"}})
-	case "SteerTurn":
-		turnID := "tu-steer-1"
+	case "review/start":
+		turnID := "tu-steer-" + req.ID
 		if emptyTurnID {
 			turnID = ""
 		}
 		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Turn{ID: turnID, ThreadID: "th-real-1", Role: "assistant", Content: "steered", CreatedAt: "2026-02-26T00:00:04Z"}})
-	case "InterruptTurn":
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"interrupted": true, "thread_id": "th-real-1"}})
-	case "RunTurnStream":
-		turnID := "tu-stream-1"
-		if emptyTurnID {
-			turnID = ""
+	case "turn/interrupt":
+		if interruptFail {
+			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &codex.JSONRPCErrorObj{Code: -32010, Message: "interrupt failed"}})
+			break
 		}
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: []codex.StreamEvent{
-			{Type: codex.StreamEventDelta, ThreadID: "th-real-1", TurnID: turnID, Delta: "hello"},
-			{Type: codex.StreamEventCompleted, ThreadID: "th-real-1", TurnID: turnID, Completed: true},
-		}})
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"interrupted": true, "thread_id": "th-real-1"}})
 	default:
 		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &codex.JSONRPCErrorObj{Code: -32601, Message: "method not found"}})
 	}

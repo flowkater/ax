@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -52,6 +53,15 @@ func TestResolveConfigEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestResolveConfigPreservesInvalidModeForValidation(t *testing.T) {
+	t.Setenv("AX_CODEX_MODE", "unknown-mode")
+
+	cfg := ResolveConfig()
+	if cfg.Mode != "unknown-mode" {
+		t.Fatalf("expected invalid mode to be preserved, got %q", cfg.Mode)
+	}
+}
+
 func TestNewAdapterModes(t *testing.T) {
 	scaffold, err := NewAdapter(ClientConfig{Mode: "scaffold"})
 	if err != nil {
@@ -76,5 +86,15 @@ func TestNewAdapterModes(t *testing.T) {
 	}
 	if client.command != "codex" {
 		t.Fatalf("unexpected client command: %s", client.command)
+	}
+}
+
+func TestNewAdapterRejectsInvalidMode(t *testing.T) {
+	_, err := NewAdapter(ClientConfig{Mode: "invalid"})
+	if err == nil {
+		t.Fatal("expected invalid mode to fail")
+	}
+	if got := err.Error(); got == "" || !strings.Contains(got, "AX_ENGINE_CONFIG_INVALID") {
+		t.Fatalf("expected AX_ENGINE_CONFIG_INVALID error, got %q", got)
 	}
 }
