@@ -154,8 +154,7 @@ func (s *ScaffoldAdapter) InterruptTurn(_ context.Context, threadID, turnID stri
 	}
 	if turnID != "" {
 		if _, ok := s.turnByID[turnID]; !ok {
-			// no-op interrupt for unknown turn is allowed in scaffold mode
-			return &InterruptResult{Interrupted: true, ThreadID: threadID, TurnID: turnID}, nil
+			return nil, fmt.Errorf("AX_ENGINE_TURN_NOT_FOUND: %s", turnID)
 		}
 	}
 	return &InterruptResult{Interrupted: true, ThreadID: threadID, TurnID: turnID}, nil

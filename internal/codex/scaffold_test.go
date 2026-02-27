@@ -58,6 +58,18 @@ func TestScaffoldAdapterLifecycleMethods(t *testing.T) {
 	}
 }
 
+func TestScaffoldAdapterInterruptTurnUnknownTurnReturnsError(t *testing.T) {
+	adapter := NewScaffoldAdapter()
+	ctx := context.Background()
+	thread, err := adapter.CreateThread(ctx, "interrupt")
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	if _, err := adapter.InterruptTurn(ctx, thread.ID, "turn-missing"); err == nil {
+		t.Fatal("expected unknown turn interrupt to fail")
+	}
+}
+
 func TestScaffoldAdapterStreamTurn(t *testing.T) {
 	adapter := NewScaffoldAdapter()
 	ctx := context.Background()

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1588,6 +1589,132 @@ func TestRunRealModeAndRecoverAutoUsesThreadState(t *testing.T) {
 	}
 }
 
+func TestRunRealModeFailsOnEmptyThreadID(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_CODEX_MODE", "real")
+	t.Setenv("AX_CODEX_BIN", os.Args[0])
+	t.Setenv("AX_CODEX_ARGS", "-test.run=TestHelperProcessCodexServerAX")
+	t.Setenv("AX_CODEX_TIMEOUT", "5s")
+	t.Setenv("AX_CODEX_RETRIES", "0")
+	t.Setenv("AX_TEST_EMPTY_THREAD_ID", "1")
+	t.Setenv("GO_WANT_HELPER_PROCESS_AX", "1")
+
+	if _, err := executeAX(t, "propose", "Codex Empty Thread ID"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "run", "--plan", planName); err == nil {
+		t.Fatal("expected run to fail when real mode returns empty thread id")
+	}
+	st := readState(t, tmp)
+	if st.Run.ErrorCode != "AX_ENGINE_INVALID_RESPONSE" {
+		t.Fatalf("expected AX_ENGINE_INVALID_RESPONSE, got %q", st.Run.ErrorCode)
+	}
+	if !strings.Contains(st.Run.ErrorSummary, "empty thread ID") {
+		t.Fatalf("expected empty thread id summary, got %q", st.Run.ErrorSummary)
+	}
+}
+
+func TestRunRealModeFailsOnEmptyTurnID(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_CODEX_MODE", "real")
+	t.Setenv("AX_CODEX_BIN", os.Args[0])
+	t.Setenv("AX_CODEX_ARGS", "-test.run=TestHelperProcessCodexServerAX")
+	t.Setenv("AX_CODEX_TIMEOUT", "5s")
+	t.Setenv("AX_CODEX_RETRIES", "0")
+	t.Setenv("AX_TEST_EMPTY_TURN_ID", "1")
+	t.Setenv("GO_WANT_HELPER_PROCESS_AX", "1")
+
+	if _, err := executeAX(t, "propose", "Codex Empty Turn ID"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "run", "--plan", planName); err == nil {
+		t.Fatal("expected run to fail when real mode returns empty turn id")
+	}
+	st := readState(t, tmp)
+	if st.Run.ErrorCode != "AX_ENGINE_INVALID_RESPONSE" {
+		t.Fatalf("expected AX_ENGINE_INVALID_RESPONSE, got %q", st.Run.ErrorCode)
+	}
+	if !strings.Contains(st.Run.ErrorSummary, "empty turn ID") {
+		t.Fatalf("expected empty turn id summary, got %q", st.Run.ErrorSummary)
+	}
+	if len(st.Run.TurnHistory) != 0 {
+		t.Fatalf("expected no successful turns persisted, got %+v", st.Run.TurnHistory)
+	}
+}
+
+func TestRunPersistsTurnHistoryAfterEachTurn(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_CODEX_MODE", "real")
+	t.Setenv("AX_CODEX_BIN", os.Args[0])
+	t.Setenv("AX_CODEX_ARGS", "-test.run=TestHelperProcessCodexServerAX")
+	t.Setenv("AX_CODEX_TIMEOUT", "10s")
+	t.Setenv("AX_CODEX_RETRIES", "0")
+	t.Setenv("AX_TEST_DELAY_REQ_ID", "3")
+	t.Setenv("AX_TEST_DELAY_MILLIS", "3500")
+	t.Setenv("GO_WANT_HELPER_PROCESS_AX", "1")
+
+	if _, err := executeAX(t, "propose", "Codex Turn Persistence"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+
+	done := make(chan error, 1)
+	go func() {
+		root := NewRootCmd()
+		out := &bytes.Buffer{}
+		root.SetOut(out)
+		root.SetErr(out)
+		root.SetArgs([]string{"run", "--plan", planName})
+		done <- root.Execute()
+	}()
+
+	persisted := false
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		st := readState(t, tmp)
+		if len(st.Run.TurnHistory) > 0 {
+			persisted = true
+			break
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("run exited early: %v", err)
+			}
+			t.Fatal("run completed before delayed step check")
+		default:
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !persisted {
+		st := readState(t, tmp)
+		t.Fatalf("expected turn history to persist mid-run, got %+v", st.Run.TurnHistory)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run completion: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("timeout waiting for run completion")
+	}
+}
+
 func TestHelperProcessCodexServerAX(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS_AX") != "1" {
 		return
@@ -1605,30 +1732,69 @@ func TestHelperProcessCodexServerAX(t *testing.T) {
 	write := func(v any) {
 		_ = json.NewEncoder(os.Stdout).Encode(v)
 	}
+	emptyThreadID := os.Getenv("AX_TEST_EMPTY_THREAD_ID") == "1"
+	emptyTurnID := os.Getenv("AX_TEST_EMPTY_TURN_ID") == "1"
+	emptyTurnStep := strings.TrimSpace(os.Getenv("AX_TEST_EMPTY_TURN_STEP"))
+	delayStep := strings.TrimSpace(os.Getenv("AX_TEST_DELAY_STEP"))
+	delayReqID := strings.TrimSpace(os.Getenv("AX_TEST_DELAY_REQ_ID"))
+	delayMillis := 0
+	if raw := strings.TrimSpace(os.Getenv("AX_TEST_DELAY_MILLIS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			delayMillis = parsed
+		}
+	}
+	shouldApplyToPrompt := func(prompt, marker string) bool {
+		if marker == "" {
+			return false
+		}
+		return strings.Contains(prompt, "step: "+marker)
+	}
 
 	switch req.Method {
 	case "CreateThread":
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: "th-real-1", Title: "real", CreatedAt: "2026-02-26T00:00:00Z"}})
+		threadID := "th-real-1"
+		if emptyThreadID {
+			threadID = ""
+		}
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: threadID, Title: "real", CreatedAt: "2026-02-26T00:00:00Z"}})
 	case "ResumeSession":
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: "th-real-1", Title: "resumed", CreatedAt: "2026-02-26T00:00:01Z"}})
+		threadID := "th-real-1"
+		if emptyThreadID {
+			threadID = ""
+		}
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: threadID, Title: "resumed", CreatedAt: "2026-02-26T00:00:01Z"}})
 	case "GetThread":
 		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: "th-real-1", Title: "health", CreatedAt: "2026-02-26T00:00:02Z"}})
 	case "RunTurn":
 		params, _ := req.Params.(map[string]any)
 		prompt, _ := params["prompt"].(string)
+		if delayMillis > 0 && ((delayReqID != "" && req.ID == delayReqID) || shouldApplyToPrompt(prompt, delayStep)) {
+			time.Sleep(time.Duration(delayMillis) * time.Millisecond)
+		}
 		turnID := "tu-run-1"
 		if strings.Contains(prompt, "steer_instruction:") {
 			turnID = "tu-steer-bootstrap-1"
 		}
+		if emptyTurnID || shouldApplyToPrompt(prompt, emptyTurnStep) {
+			turnID = ""
+		}
 		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Turn{ID: turnID, ThreadID: "th-real-1", Role: "assistant", Content: "ok", CreatedAt: "2026-02-26T00:00:03Z"}})
 	case "SteerTurn":
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Turn{ID: "tu-steer-1", ThreadID: "th-real-1", Role: "assistant", Content: "steered", CreatedAt: "2026-02-26T00:00:04Z"}})
+		turnID := "tu-steer-1"
+		if emptyTurnID {
+			turnID = ""
+		}
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Turn{ID: turnID, ThreadID: "th-real-1", Role: "assistant", Content: "steered", CreatedAt: "2026-02-26T00:00:04Z"}})
 	case "InterruptTurn":
 		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"interrupted": true, "thread_id": "th-real-1"}})
 	case "RunTurnStream":
+		turnID := "tu-stream-1"
+		if emptyTurnID {
+			turnID = ""
+		}
 		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: []codex.StreamEvent{
-			{Type: codex.StreamEventDelta, ThreadID: "th-real-1", TurnID: "tu-stream-1", Delta: "hello"},
-			{Type: codex.StreamEventCompleted, ThreadID: "th-real-1", TurnID: "tu-stream-1", Completed: true},
+			{Type: codex.StreamEventDelta, ThreadID: "th-real-1", TurnID: turnID, Delta: "hello"},
+			{Type: codex.StreamEventCompleted, ThreadID: "th-real-1", TurnID: turnID, Completed: true},
 		}})
 	default:
 		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &codex.JSONRPCErrorObj{Code: -32601, Message: "method not found"}})

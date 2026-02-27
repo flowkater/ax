@@ -1419,15 +1419,60 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 		}
 		return "", 0, errors.New(errMsg)
 	}
+	engineMode := strings.TrimSpace(codexCfg.Mode)
+	if engineMode == "" {
+		engineMode = codex.DefaultMode
+	}
+	st.Run.EngineMode = engineMode
 	threadID := strings.TrimSpace(thread.ID)
 	if threadID == "" {
+		if strings.EqualFold(engineMode, "real") {
+			errCode := "AX_ENGINE_INVALID_RESPONSE"
+			errMsg := "real mode adapter returned empty thread ID"
+			st.Run.RetryAttempts++
+			st.Run.LastFailedStep = "thread:create"
+			st.Run.LastFailureCause = "codex returned empty thread id"
+			st.Run.ErrorCode = errCode
+			st.Run.ErrorSummary = errMsg
+			st.Run.RetryLimit = retryLimit
+			st.Run.RecoverHint = fmt.Sprintf("check codex app-server then run `ax run --plan %s --resume --retry %d`", planID, retryLimit)
+			if st.Run.RetryAttempts > retryLimit {
+				st.Run.Blocked = true
+				st.Run.ErrorCode = "E_RUN_BLOCKED"
+				st.Run.ErrorSummary = fmt.Sprintf("retry attempts exceeded (%d>%d)", st.Run.RetryAttempts, retryLimit)
+				st.Run.RecoverHint = "unblock by increasing --retry (0..5) or reset state after fixing root cause"
+				errCode = "E_RUN_BLOCKED"
+				errMsg = st.Run.ErrorSummary
+			}
+			st.SetLastError(errCode, errMsg, now)
+			st.SetLastResult("run", "failed", filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(failLog))), now)
+			_ = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(failLog))))
+			if err := writeObservabilityLog(failLog, "run_thread_failed", string(core.PhaseImplementation), "", "", errCode, errMsg, now, 0, st.Run.EngineMode); err != nil {
+				return "", 0, err
+			}
+			if err := st.Save(base); err != nil {
+				return "", 0, err
+			}
+			_ = writeRuntimeCheckpoint(base, st, "failed", "run", time.Now())
+			_ = appendRuntimeJournal(base, runtimeJournalEntry{
+				Time:       time.Now().Format(time.RFC3339),
+				SessionID:  st.Runtime.SessionID,
+				ClusterID:  st.Runtime.ClusterID,
+				NodeID:     st.Runtime.NodeID,
+				Command:    "run",
+				Stage:      "failed",
+				Mode:       string(st.Runtime.Mode),
+				Phase:      string(st.Phase),
+				PlanID:     planID,
+				ErrorCode:  errCode,
+				Error:      errMsg,
+				EngineMode: st.Run.EngineMode,
+			})
+			return "", 0, errors.New(errMsg)
+		}
 		threadID = syntheticThreadID(st.Runtime.SessionID + "-" + planID)
 	}
 	st.Run.ThreadID = threadID
-	st.Run.EngineMode = strings.TrimSpace(codexCfg.Mode)
-	if st.Run.EngineMode == "" {
-		st.Run.EngineMode = codex.DefaultMode
-	}
 	if err := writeObservabilityLog(startLog, "run_start", string(core.PhaseImplementation), threadID, "", "", "run started", now, 0, st.Run.EngineMode); err != nil {
 		return "", 0, err
 	}
@@ -1649,9 +1694,6 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 							lastTurnID = strings.TrimSpace(evt.TurnID)
 						}
 					}
-					if lastTurnID == "" {
-						lastTurnID = fmt.Sprintf("stream-%03d", i+1)
-					}
 					turn = &codex.Turn{
 						ID:        lastTurnID,
 						ThreadID:  threadID,
@@ -1723,6 +1765,55 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 			return "", 0, errors.New(errMsg)
 		}
 		turnID := strings.TrimSpace(turn.ID)
+		if turnID == "" && strings.EqualFold(st.Run.EngineMode, "real") {
+			errCode := "AX_ENGINE_INVALID_RESPONSE"
+			errMsg := "real mode adapter returned empty turn ID"
+			st.Run.RetryAttempts++
+			st.Run.LastFailedStep = step.Step
+			st.Run.LastFailureCause = "codex returned empty turn id"
+			st.Run.ErrorCode = errCode
+			st.Run.ErrorSummary = errMsg
+			st.Run.RetryLimit = retryLimit
+			st.Run.RecoverHint = fmt.Sprintf("check codex app-server then run `ax run --plan %s --resume --retry %d`", planID, retryLimit)
+			if st.Run.RetryAttempts > retryLimit {
+				st.Run.Blocked = true
+				st.Run.ErrorCode = "E_RUN_BLOCKED"
+				st.Run.ErrorSummary = fmt.Sprintf("retry attempts exceeded (%d>%d)", st.Run.RetryAttempts, retryLimit)
+				st.Run.RecoverHint = "unblock by increasing --retry (0..5) or reset state after fixing root cause"
+				errCode = "E_RUN_BLOCKED"
+				errMsg = st.Run.ErrorSummary
+			}
+			st.SetLastError(errCode, errMsg, now)
+			st.SetLastResult("run", "failed", filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(failLog))), now)
+			_ = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(failLog))))
+			failedTurnID := strings.TrimSpace(st.Run.ActiveTurnID)
+			if err := writeObservabilityLog(failLog, "run_turn_failed", string(core.PhaseImplementation), threadID, failedTurnID, errCode, errMsg, now, time.Since(stepStart).Milliseconds(), st.Run.EngineMode); err != nil {
+				return "", 0, err
+			}
+			if err := st.Save(base); err != nil {
+				return "", 0, err
+			}
+			_ = writeRuntimeCheckpoint(base, st, "failed", "run", time.Now())
+			_ = appendRuntimeJournal(base, runtimeJournalEntry{
+				Time:       time.Now().Format(time.RFC3339),
+				SessionID:  st.Runtime.SessionID,
+				ClusterID:  st.Runtime.ClusterID,
+				NodeID:     st.Runtime.NodeID,
+				Command:    "run",
+				Stage:      "failed",
+				Mode:       string(st.Runtime.Mode),
+				Phase:      string(st.Phase),
+				PlanID:     planID,
+				ErrorCode:  errCode,
+				Error:      errMsg,
+				ThreadID:   threadID,
+				TurnID:     failedTurnID,
+				Step:       step.Step,
+				DurationMS: time.Since(stepStart).Milliseconds(),
+				EngineMode: st.Run.EngineMode,
+			})
+			return "", 0, errors.New(errMsg)
+		}
 		if turnID == "" {
 			turnID = step.TurnID
 		}
@@ -1739,6 +1830,12 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 			StartedAt: stepStart.UTC().Format(time.RFC3339),
 			EndedAt:   time.Now().UTC().Format(time.RFC3339),
 		}, 100)
+		if err := st.Save(base); err != nil {
+			return "", 0, err
+		}
+		if err := writeRuntimeCheckpoint(base, st, "in_progress", "run", time.Now()); err != nil {
+			return "", 0, err
+		}
 		_ = appendRuntimeJournal(base, runtimeJournalEntry{
 			Time:       time.Now().Format(time.RFC3339),
 			SessionID:  st.Runtime.SessionID,
