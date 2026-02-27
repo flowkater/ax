@@ -88,14 +88,27 @@ type TDDState struct {
 
 // RunState tracks resumable run metadata.
 type RunState struct {
-	LastFailedStep   string `json:"last_failed_step,omitempty"`
-	LastFailureCause string `json:"last_failure_cause,omitempty"`
-	ErrorCode        string `json:"error_code,omitempty"`
-	ErrorSummary     string `json:"error_summary,omitempty"`
-	RecoverHint      string `json:"recover_hint,omitempty"`
-	RetryAttempts    int    `json:"retry_attempts,omitempty"`
-	RetryLimit       int    `json:"retry_limit,omitempty"`
-	Blocked          bool   `json:"blocked,omitempty"`
+	LastFailedStep   string    `json:"last_failed_step,omitempty"`
+	LastFailureCause string    `json:"last_failure_cause,omitempty"`
+	ErrorCode        string    `json:"error_code,omitempty"`
+	ErrorSummary     string    `json:"error_summary,omitempty"`
+	RecoverHint      string    `json:"recover_hint,omitempty"`
+	RetryAttempts    int       `json:"retry_attempts,omitempty"`
+	RetryLimit       int       `json:"retry_limit,omitempty"`
+	Blocked          bool      `json:"blocked,omitempty"`
+	ThreadID         string    `json:"thread_id,omitempty"`
+	ActiveTurnID     string    `json:"active_turn_id,omitempty"`
+	EngineMode       string    `json:"engine_mode,omitempty"`
+	TurnHistory      []TurnRef `json:"turn_history,omitempty"`
+}
+
+// TurnRef tracks one persisted run step↔turn mapping.
+type TurnRef struct {
+	TurnID    string `json:"turn_id,omitempty"`
+	Step      string `json:"step,omitempty"`
+	Status    string `json:"status,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+	EndedAt   string `json:"ended_at,omitempty"`
 }
 
 var allowedTransitions = map[Phase]map[Phase]struct{}{
@@ -242,6 +255,9 @@ func (s *State) normalize() {
 	if s.ContextChain == nil {
 		s.ContextChain = []string{}
 	}
+	if s.Run.TurnHistory == nil {
+		s.Run.TurnHistory = []TurnRef{}
+	}
 	if s.TransitionedAt == "" {
 		s.TransitionedAt = time.Now().Format(time.RFC3339)
 	}
@@ -249,6 +265,20 @@ func (s *State) normalize() {
 		s.TriggerCommand = "state:normalize"
 	}
 	s.Progress = ProgressForPhase(s.Phase)
+}
+
+// AppendTurnRef appends a turn reference while keeping a bounded history.
+func (s *State) AppendTurnRef(ref TurnRef, max int) {
+	if s == nil {
+		return
+	}
+	if max <= 0 {
+		max = 100
+	}
+	s.Run.TurnHistory = append(s.Run.TurnHistory, ref)
+	if len(s.Run.TurnHistory) > max {
+		s.Run.TurnHistory = append([]TurnRef(nil), s.Run.TurnHistory[len(s.Run.TurnHistory)-max:]...)
+	}
 }
 
 // Transition is a package-level convenience wrapper.

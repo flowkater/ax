@@ -104,18 +104,18 @@
 ### 체크리스트
 
 #### 구현
-- [ ] `internal/codex/factory.go` 추가
-- [ ] `internal/codex/scaffold.go` 추가
-- [ ] `cmd/ax/commands.go`에 engine 생성/전달 코드 추가
+- [x] `internal/codex/factory.go` 추가
+- [x] `internal/codex/scaffold.go` 추가
+- [x] `cmd/ax/commands.go`에 engine 생성/전달 코드 추가
 
 #### 테스트
-- [ ] `internal/codex/factory_test.go`: env 조합별 mode/timeout/retries 검증
-- [ ] `internal/codex/scaffold_test.go`: synthetic thread/turn 결정성 검증
-- [ ] `cmd/ax/commands_test.go`: `AX_CODEX_MODE=scaffold` 기본 동작 회귀 검증
+- [x] `internal/codex/factory_test.go`: env 조합별 mode/timeout/retries 검증
+- [x] `internal/codex/scaffold_test.go`: synthetic thread/turn 결정성 검증
+- [x] `cmd/ax/commands_test.go`: `AX_CODEX_MODE=scaffold` 기본 동작 회귀 검증
 
 #### Phase Gate
-- [ ] `go test ./internal/codex ./cmd/ax -run 'Factory|Scaffold|Run'` PASS
-- [ ] mode를 `real/scaffold`로 바꿔도 run 진입이 panic 없이 동작
+- [x] `go test ./internal/codex ./cmd/ax -run 'Factory|Scaffold|Run'` PASS
+- [x] mode를 `real/scaffold`로 바꿔도 run 진입이 panic 없이 동작
 
 ---
 
@@ -150,18 +150,18 @@ run/recover가 codex 세션을 재사용할 수 있도록 state에 thread/turn �
 ### 체크리스트
 
 #### 구현
-- [ ] `RunState`/`TurnRef` 필드 추가
-- [ ] turn history 상한 유지 로직 추가
-- [ ] `run` 성공/실패 시 필드 초기화 정책 명시(`active_turn_id` clear 시점)
+- [x] `RunState`/`TurnRef` 필드 추가
+- [x] turn history 상한 유지 로직 추가
+- [x] `run` 성공/실패 시 필드 초기화 정책 명시(`active_turn_id` clear 시점)
 
 #### 테스트
-- [ ] `internal/core/state_test.go`: 구버전 JSON/YAML 로드 호환
-- [ ] `TurnHistory` 직렬화/역직렬화
-- [ ] 100건 초과 시 trim 검증
+- [x] `internal/core/state_test.go`: 구버전 JSON/YAML 로드 호환
+- [x] `TurnHistory` 직렬화/역직렬화
+- [x] 100건 초과 시 trim 검증
 
 #### Phase Gate
-- [ ] `go test ./internal/core -run 'State|RunState|Turn'` PASS
-- [ ] 기존 fixture/테스트가 스키마 변경으로 깨지지 않음
+- [x] `go test ./internal/core -run 'State|RunState|Turn'` PASS
+- [x] 기존 fixture/테스트가 스키마 변경으로 깨지지 않음
 
 ---
 
@@ -207,22 +207,22 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 ### 체크리스트
 
 #### 구현
-- [ ] `runPlan` 시그니처/호출부 변경 완료
-- [ ] thread 확보(create/resume) 분기 구현
-- [ ] step loop에서 real turn 호출 + state 저장 구현
-- [ ] `internal/codex/prompt.go` 추가
-- [ ] run report에 실제 turn id 반영
+- [x] `runPlan` 시그니처/호출부 변경 완료
+- [x] thread 확보(create/resume) 분기 구현
+- [x] step loop에서 real turn 호출 + state 저장 구현
+- [x] `internal/codex/prompt.go` 추가
+- [x] run report에 실제 turn id 반영
 
 #### 테스트
-- [ ] `cmd/ax/commands_test.go`: mock adapter 기반 accept 시나리오
-- [ ] `cmd/ax/commands_test.go`: steer/reject 분기 호출 검증
-- [ ] `cmd/ax/commands_test.go`: 실패 시 `LastFailedStep` + `thread_id` 저장 검증
-- [ ] `internal/codex/prompt_test.go`: 프롬프트 생성 결정성 검증
+- [x] `cmd/ax/commands_test.go`: mock adapter 기반 accept 시나리오
+- [x] `cmd/ax/commands_test.go`: steer/reject 분기 호출 검증
+- [x] `cmd/ax/commands_test.go`: 실패 시 `LastFailedStep` + `thread_id` 저장 검증
+- [x] `internal/codex/prompt_test.go`: 프롬프트 생성 결정성 검증
 
 #### Phase Gate
-- [ ] `AX_CODEX_MODE=real` + helper process로 run 1회 성공
-- [ ] `state.yaml`에 `thread_id`, `turn_history[*].turn_id` 실제 값 기록 확인
-- [ ] `go test ./cmd/ax ./internal/codex -run 'Run|Prompt'` PASS
+- [x] `AX_CODEX_MODE=real` + helper process로 run 1회 성공
+- [x] `state.yaml`에 `thread_id`, `turn_history[*].turn_id` 실제 값 기록 확인
+- [x] `go test ./cmd/ax ./internal/codex -run 'Run|Prompt'` PASS
 
 ---
 
@@ -262,20 +262,20 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex
 ### 체크리스트
 
 #### 구현
-- [ ] `recover auto` 판단에 `thread_id`/`engine_mode` 반영
-- [ ] `run --resume` 시 `ResumeSession` 호출 및 재개 step 계산
-- [ ] steer/reject에서 `SteerTurn`/`InterruptTurn` 연결
-- [ ] (선택) fork/rollback 경로 구현
+- [x] `recover auto` 판단에 `thread_id`/`engine_mode` 반영
+- [x] `run --resume` 시 `ResumeSession` 호출 및 재개 step 계산
+- [x] steer/reject에서 `SteerTurn`/`InterruptTurn` 연결
+- [x] (선택) fork/rollback 경로 구현
 
 #### 테스트
-- [ ] resume 불가(`thread_id` 없음) 에러 메시지 검증
-- [ ] auto 전략이 조건별로 resume/rerun 올바르게 선택
-- [ ] reject 시 interrupt 호출 여부 검증
-- [ ] fork 수행 시 state thread id 갱신 검증
+- [x] resume 불가(`thread_id` 없음) 에러 메시지 검증
+- [x] auto 전략이 조건별로 resume/rerun 올바르게 선택
+- [x] reject 시 interrupt 호출 여부 검증
+- [x] fork 수행 시 state thread id 갱신 검증
 
 #### Phase Gate
-- [ ] 실패 run 후 `ax recover --strategy auto`가 예측 가능한 경로로 복구
-- [ ] `go test ./cmd/ax -run 'Recover|Resume|Decision'` PASS
+- [x] 실패 run 후 `ax recover --strategy auto`가 예측 가능한 경로로 복구
+- [x] `go test ./cmd/ax -run 'Recover|Resume|Decision'` PASS
 
 ---
 
@@ -313,17 +313,17 @@ Codex JSON-RPC 에러를 ax 에러 모델로 통일하고, 운영 로그에서 t
 ### 체크리스트
 
 #### 구현
-- [ ] `internal/codex/errors.go` + 매핑 함수 구현
-- [ ] `runPlan` 실패 경로에서 매핑 함수 사용
-- [ ] observability/runtime-journal에 turn 메타 필드 기록
+- [x] `internal/codex/errors.go` + 매핑 함수 구현
+- [x] `runPlan` 실패 경로에서 매핑 함수 사용
+- [x] observability/runtime-journal에 turn 메타 필드 기록
 
 #### 테스트
-- [ ] `internal/codex/errors_test.go`: 매핑/재시도 가능 여부 검증
-- [ ] `cmd/ax/commands_test.go`: codex 오류 주입 시 state/log 필드 검증
+- [x] `internal/codex/errors_test.go`: 매핑/재시도 가능 여부 검증
+- [x] `cmd/ax/commands_test.go`: codex 오류 주입 시 state/log 필드 검증
 
 #### Phase Gate
-- [ ] 동일 에러 입력 시 동일한 `ErrorCode`/메시지 생성(결정성)
-- [ ] `go test ./internal/codex ./cmd/ax -run 'Error|Observability'` PASS
+- [x] 동일 에러 입력 시 동일한 `ErrorCode`/메시지 생성(결정성)
+- [x] `go test ./internal/codex ./cmd/ax -run 'Error|Observability'` PASS
 
 ---
 
@@ -359,18 +359,18 @@ Codex JSON-RPC 에러를 ax 에러 모델로 통일하고, 운영 로그에서 t
 ### 체크리스트
 
 #### 구현
-- [ ] doctor JSON 계약 확장
-- [ ] TUI snapshot(Engine) 필드 확장
-- [ ] 운영 문서(환경변수/실패 대응) 업데이트
+- [x] doctor JSON 계약 확장
+- [x] TUI snapshot(Engine) 필드 확장
+- [x] 운영 문서(환경변수/실패 대응) 업데이트
 
 #### 테스트
-- [ ] `cmd/ax/root_test.go`/`commands_test.go`: doctor JSON 필드 검증
-- [ ] TUI snapshot 테스트에 thread/turn 필드 검증 추가
-- [ ] helper server 기반 smoke: `run -> recover -> doctor` 흐름 검증
+- [x] `cmd/ax/root_test.go`/`commands_test.go`: doctor JSON 필드 검증
+- [x] TUI snapshot 테스트에 thread/turn 필드 검증 추가
+- [x] helper server 기반 smoke: `run -> recover -> doctor` 흐름 검증
 
 #### Phase Gate
-- [ ] `ax doctor runtime --json`에서 codex 관련 필드 확인 가능
-- [ ] `go test ./cmd/ax ./internal/core -run 'Doctor|TUI'` PASS
+- [x] `ax doctor runtime --json`에서 codex 관련 필드 확인 가능
+- [x] `go test ./cmd/ax ./internal/core -run 'Doctor|TUI'` PASS
 
 ---
 
@@ -422,13 +422,13 @@ go build ./...
 
 ## 6) 최종 완료 기준 (DoD)
 
-- [ ] real 모드에서 run 시 실제 codex thread/turn 생성 및 state 반영
-- [ ] `run --resume`/`recover --strategy auto`가 thread 상태 기반으로 동작
-- [ ] reject/steer/interrupt 경로가 adapter 호출과 state 갱신을 일치시킴
-- [ ] 에러 코드가 `AX_ENGINE_*`로 표준화되어 기록됨
-- [ ] doctor/tui에서 codex 세션 가시화 가능
-- [ ] scaffold 모드 기본 동작 회귀 없음
-- [ ] `go test ./...` + `go build ./...` PASS
+- [x] real 모드에서 run 시 실제 codex thread/turn 생성 및 state 반영
+- [x] `run --resume`/`recover --strategy auto`가 thread 상태 기반으로 동작
+- [x] reject/steer/interrupt 경로가 adapter 호출과 state 갱신을 일치시킴
+- [x] 에러 코드가 `AX_ENGINE_*`로 표준화되어 기록됨
+- [x] doctor/tui에서 codex 세션 가시화 가능
+- [x] scaffold 모드 기본 동작 회귀 없음
+- [x] `go test ./...` + `go build ./...` PASS
 
 ---
 
@@ -438,3 +438,29 @@ go build ./...
 - daemon/websocket 기반 장기 연결 아키텍처
 - turn 결과 자동 코드 적용(autofix loop)
 - 멀티노드 codex 스케줄링
+
+
+---
+
+## 8) 실행 결과 (2026-02-27)
+
+- 구현 완료 파일(핵심):
+  - `internal/codex/factory.go`, `internal/codex/scaffold.go`, `internal/codex/errors.go`, `internal/codex/prompt.go`
+  - `cmd/ax/commands.go` (run/recover/doctor/tui codex 연동)
+  - `internal/core/state.go` (thread/turn history schema)
+- 테스트 추가 파일:
+  - `internal/codex/factory_test.go`, `internal/codex/scaffold_test.go`, `internal/codex/errors_test.go`, `internal/codex/prompt_test.go`
+  - `cmd/ax/commands_test.go` (real/scaffold/recover/doctor codex 경로)
+  - `internal/core/state_test.go`, `internal/core/tui_test.go`
+- 최종 검증:
+  - `go test ./... -count=1` PASS
+  - `go test -race ./... -count=1` PASS
+  - `go vet ./...` PASS
+  - `go build ./...` PASS
+  - smoke evidence:
+    - `/tmp/ax-codex-integration-smoke-summary.json`
+    - `/tmp/ax-codex-integration-smoke-summary-2.json`
+
+- 리뷰 검증:
+  - 자동 reviewer/architect 에이전트 스레드 한도(`max 6`)로 외부 아키텍트 호출이 제한되어,
+    로컬 수동 아키텍처 점검 + 전수 테스트/스모크로 대체 검증 수행.

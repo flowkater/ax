@@ -313,6 +313,10 @@ func renderTUIScreenEngine(snap tuiSnapshot) string {
 	b.WriteString(fmt.Sprintf("session_id: %s\n", emptyFallback(snap.Engine.SessionID)))
 	b.WriteString(fmt.Sprintf("cluster_id: %s\n", emptyFallback(snap.Engine.ClusterID)))
 	b.WriteString(fmt.Sprintf("node_id: %s\n", emptyFallback(snap.Engine.NodeID)))
+	b.WriteString(fmt.Sprintf("thread_id: %s\n", emptyFallback(snap.Engine.ThreadID)))
+	b.WriteString(fmt.Sprintf("active_turn_id: %s\n", emptyFallback(snap.Engine.ActiveTurnID)))
+	b.WriteString(fmt.Sprintf("turn_count: %d\n", snap.Engine.TurnCount))
+	b.WriteString(fmt.Sprintf("codex_mode: %s\n", emptyFallback(snap.Engine.CodexMode)))
 	if len(snap.Engine.ActiveSessions) == 0 {
 		b.WriteString("active_sessions: none\n")
 	} else {

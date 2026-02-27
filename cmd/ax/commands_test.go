@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/flowkater/ax/internal/codex"
 	"github.com/flowkater/ax/internal/core"
 )
 
@@ -1463,6 +1464,176 @@ func TestTUISnapshotAndGuardedAction(t *testing.T) {
 	if !strings.Contains(actionOut, "tui: action=retry confirmed") {
 		t.Fatalf("unexpected tui action output: %s", actionOut)
 	}
+}
+
+func TestRunScaffoldPersistsThreadAndTurnHistory(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_CODEX_MODE", "scaffold")
+	if _, err := executeAX(t, "propose", "Codex Scaffold"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "run", "--plan", planName); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	st := readState(t, tmp)
+	if !strings.HasPrefix(st.Run.ThreadID, "scf-th-") {
+		t.Fatalf("expected scaffold thread id, got %q", st.Run.ThreadID)
+	}
+	if len(st.Run.TurnHistory) == 0 {
+		t.Fatalf("expected turn history to be populated")
+	}
+	if st.Run.ActiveTurnID != "" {
+		t.Fatalf("expected active turn cleared, got %q", st.Run.ActiveTurnID)
+	}
+	if st.Run.EngineMode != "scaffold" {
+		t.Fatalf("expected engine mode scaffold, got %q", st.Run.EngineMode)
+	}
+}
+
+func TestRecoverResumeRequiresThreadID(t *testing.T) {
+	tmp := setupTempCWD(t)
+	if _, err := executeAX(t, "state"); err != nil {
+		t.Fatalf("state: %v", err)
+	}
+	st := readState(t, tmp)
+	st.Run.LastFailedStep = "run:in-progress"
+	st.Run.LastFailureCause = "interrupted-or-crash"
+	st.Run.ThreadID = ""
+	if err := core.SaveState(tmp, st); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, err := executeAX(t, "recover", "--strategy", "resume"); err == nil {
+		t.Fatal("expected resume without thread_id to fail")
+	}
+}
+
+func TestDoctorRuntimeJSONIncludesCodexFields(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_CODEX_MODE", "scaffold")
+	if _, err := executeAX(t, "propose", "Doctor Codex Fields"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "run", "--plan", planName); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	out, err := executeAX(t, "doctor", "runtime", "--json")
+	if err != nil {
+		t.Fatalf("doctor runtime json: %v", err)
+	}
+	payload := map[string]any{}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("unmarshal doctor json: %v\n%s", err, out)
+	}
+	for _, key := range []string{"engine_mode", "thread_id", "active_turn_id", "turn_count", "codex_bin", "codex_reachable"} {
+		if _, ok := payload[key]; !ok {
+			t.Fatalf("missing doctor field %q in payload %#v", key, payload)
+		}
+	}
+}
+
+func TestRunRealModeAndRecoverAutoUsesThreadState(t *testing.T) {
+	tmp := setupTempCWD(t)
+	t.Setenv("AX_CODEX_MODE", "real")
+	t.Setenv("AX_CODEX_BIN", os.Args[0])
+	t.Setenv("AX_CODEX_ARGS", "-test.run=TestHelperProcessCodexServerAX")
+	t.Setenv("AX_CODEX_TIMEOUT", "5s")
+	t.Setenv("AX_CODEX_RETRIES", "0")
+	t.Setenv("GO_WANT_HELPER_PROCESS_AX", "1")
+
+	if _, err := executeAX(t, "propose", "Codex Real Mode"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	proposalID := singleEntryName(t, filepath.Join(tmp, ".ax", "proposals"))
+	if _, err := executeAX(t, "plan", "--from", proposalID); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	planName := singleEntryName(t, filepath.Join(tmp, ".ax", "plans"))
+	if _, err := executeAX(t, "run", "--plan", planName, "--decision", "steer", "--steer", "safer"); err != nil {
+		t.Fatalf("run real steer: %v", err)
+	}
+	st := readState(t, tmp)
+	if st.Run.ThreadID != "th-real-1" {
+		t.Fatalf("expected real thread id th-real-1, got %q", st.Run.ThreadID)
+	}
+	if len(st.Run.TurnHistory) == 0 {
+		t.Fatal("expected turn history in real mode")
+	}
+	lastTurn := st.Run.TurnHistory[len(st.Run.TurnHistory)-1]
+	if !strings.HasPrefix(lastTurn.TurnID, "tu-steer-") && !strings.HasPrefix(lastTurn.TurnID, "tu-stream-") {
+		t.Fatalf("expected steer or streamed turn id, got %q", lastTurn.TurnID)
+	}
+
+	st.Run.LastFailedStep = "run:in-progress"
+	st.Run.LastFailureCause = "interrupted-or-crash"
+	if err := core.SaveState(tmp, st); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	out, err := executeAX(t, "recover", "--strategy", "auto")
+	if err != nil {
+		t.Fatalf("recover auto: %v", err)
+	}
+	if !strings.Contains(out, "strategy=resume") {
+		t.Fatalf("expected auto recover to choose resume, got: %s", out)
+	}
+}
+
+func TestHelperProcessCodexServerAX(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS_AX") != "1" {
+		return
+	}
+
+	var req codex.JSONRPCRequest
+	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
+		_ = json.NewEncoder(os.Stdout).Encode(codex.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      "0",
+			Error:   &codex.JSONRPCErrorObj{Code: -32700, Message: "parse error"},
+		})
+		os.Exit(0)
+	}
+	write := func(v any) {
+		_ = json.NewEncoder(os.Stdout).Encode(v)
+	}
+
+	switch req.Method {
+	case "CreateThread":
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: "th-real-1", Title: "real", CreatedAt: "2026-02-26T00:00:00Z"}})
+	case "ResumeSession":
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: "th-real-1", Title: "resumed", CreatedAt: "2026-02-26T00:00:01Z"}})
+	case "GetThread":
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: "th-real-1", Title: "health", CreatedAt: "2026-02-26T00:00:02Z"}})
+	case "RunTurn":
+		params, _ := req.Params.(map[string]any)
+		prompt, _ := params["prompt"].(string)
+		turnID := "tu-run-1"
+		if strings.Contains(prompt, "steer_instruction:") {
+			turnID = "tu-steer-bootstrap-1"
+		}
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Turn{ID: turnID, ThreadID: "th-real-1", Role: "assistant", Content: "ok", CreatedAt: "2026-02-26T00:00:03Z"}})
+	case "SteerTurn":
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Turn{ID: "tu-steer-1", ThreadID: "th-real-1", Role: "assistant", Content: "steered", CreatedAt: "2026-02-26T00:00:04Z"}})
+	case "InterruptTurn":
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"interrupted": true, "thread_id": "th-real-1"}})
+	case "RunTurnStream":
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: []codex.StreamEvent{
+			{Type: codex.StreamEventDelta, ThreadID: "th-real-1", TurnID: "tu-stream-1", Delta: "hello"},
+			{Type: codex.StreamEventCompleted, ThreadID: "th-real-1", TurnID: "tu-stream-1", Completed: true},
+		}})
+	default:
+		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &codex.JSONRPCErrorObj{Code: -32601, Message: "method not found"}})
+	}
+	os.Exit(0)
 }
 
 func executeAX(t *testing.T, args ...string) (string, error) {

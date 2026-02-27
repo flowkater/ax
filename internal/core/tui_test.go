@@ -35,6 +35,10 @@ func TestTUIViewModelContractsMarshalExpectedFields(t *testing.T) {
 			SessionID:      "sess-1",
 			ClusterID:      "cluster-a",
 			NodeID:         "node-a",
+			ThreadID:       "th-1",
+			ActiveTurnID:   "tu-1",
+			TurnCount:      2,
+			CodexMode:      "scaffold",
 			ActiveSessions: map[string]string{"sess-1": "run"},
 		},
 	}
@@ -49,6 +53,7 @@ func TestTUIViewModelContractsMarshalExpectedFields(t *testing.T) {
 		`"count"`, `"items"`, `"status_line"`,
 		`"verdict"`, `"criteria"`, `"failed_checks"`,
 		`"runtime_mode"`, `"session_id"`, `"cluster_id"`, `"node_id"`,
+		`"thread_id"`, `"active_turn_id"`, `"turn_count"`, `"codex_mode"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing field %s in json: %s", want, got)

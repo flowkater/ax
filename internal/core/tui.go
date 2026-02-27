@@ -43,5 +43,9 @@ type EngineViewModel struct {
 	SessionID      string            `json:"session_id"`
 	ClusterID      string            `json:"cluster_id"`
 	NodeID         string            `json:"node_id"`
+	ThreadID       string            `json:"thread_id,omitempty"`
+	ActiveTurnID   string            `json:"active_turn_id,omitempty"`
+	TurnCount      int               `json:"turn_count"`
+	CodexMode      string            `json:"codex_mode,omitempty"`
 	ActiveSessions map[string]string `json:"active_sessions"`
 }

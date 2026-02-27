@@ -115,6 +115,39 @@ func TestLoadContextLayers(t *testing.T) {
 	}
 }
 
+func TestRunStateTurnHistoryCompatibilityAndTrim(t *testing.T) {
+	tmp := t.TempDir()
+	st := DefaultState(time.Now())
+	st.Run.ThreadID = "th-1"
+	st.Run.ActiveTurnID = "tu-1"
+	st.Run.EngineMode = "scaffold"
+	for i := 0; i < 120; i++ {
+		st.AppendTurnRef(TurnRef{
+			TurnID:    "tu",
+			Step:      "S",
+			Status:    "completed",
+			StartedAt: time.Now().UTC().Format(time.RFC3339),
+			EndedAt:   time.Now().UTC().Format(time.RFC3339),
+		}, 100)
+	}
+	if len(st.Run.TurnHistory) != 100 {
+		t.Fatalf("expected history trimmed to 100, got %d", len(st.Run.TurnHistory))
+	}
+	if err := st.Save(tmp); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	reloaded, err := LoadState(tmp)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if reloaded.Run.ThreadID != "th-1" {
+		t.Fatalf("expected thread_id persisted, got %q", reloaded.Run.ThreadID)
+	}
+	if len(reloaded.Run.TurnHistory) != 100 {
+		t.Fatalf("expected persisted turn history length 100, got %d", len(reloaded.Run.TurnHistory))
+	}
+}
+
 func mustWriteFile(t *testing.T, path string, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

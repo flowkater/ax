@@ -2,6 +2,7 @@ package ax
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/flowkater/ax/internal/codex"
 	"github.com/flowkater/ax/internal/core"
 	"github.com/spf13/cobra"
 )
@@ -151,6 +153,11 @@ func newRunCmd() *cobra.Command {
 				if err := ensureMVPLayout(wd); err != nil {
 					return err
 				}
+				codexCfg := codex.ResolveConfig()
+				engine, err := codex.NewAdapter(codexCfg)
+				if err != nil {
+					return err
+				}
 
 				runFile, taskCount, err := runPlan(wd, plan, runOptions{
 					tdd:         tdd,
@@ -167,7 +174,7 @@ func newRunCmd() *cobra.Command {
 					force:       force,
 					forceReason: forceReason,
 					noWorktree:  noWorktree,
-				}, rt, now)
+				}, rt, engine, codexCfg, now)
 				if err != nil {
 					return err
 				}
@@ -434,7 +441,10 @@ func newRecoverCmd() *cobra.Command {
 				resolvedMode := requestedMode
 				if requestedMode == "auto" {
 					resolvedMode = "rerun"
-					explicitResumeCandidate := strings.TrimSpace(st.Run.LastFailedStep) != "" || strings.TrimSpace(st.Run.LastFailureCause) != ""
+					explicitResumeCandidate := strings.TrimSpace(st.Run.ThreadID) != "" &&
+						(strings.TrimSpace(st.Run.LastFailedStep) != "" ||
+							strings.TrimSpace(st.Run.LastFailureCause) != "" ||
+							strings.TrimSpace(st.Run.ActiveTurnID) != "")
 					if explicitResumeCandidate {
 						resolvedMode = "resume"
 					} else {
@@ -445,7 +455,7 @@ func newRecoverCmd() *cobra.Command {
 						if ok {
 							switch lastRunEntry.Stage {
 							case "start", "checkpoint", "failed":
-								if st.TDD.Enabled {
+								if strings.TrimSpace(st.Run.ThreadID) != "" {
 									resolvedMode = "resume"
 								} else {
 									resolvedMode = "rerun"
@@ -457,28 +467,60 @@ func newRecoverCmd() *cobra.Command {
 					}
 				}
 				if resolvedMode == "resume" {
+					if strings.TrimSpace(st.Run.ThreadID) == "" {
+						return errors.New("recover resume unavailable: no persisted thread_id")
+					}
+					cfg := codex.ResolveConfig()
+					engine, err := codex.NewAdapter(cfg)
+					if err != nil {
+						return err
+					}
+					callCtx := context.Background()
+					cancel := func() {}
+					if cfg.Timeout > 0 {
+						callCtx, cancel = context.WithTimeout(context.Background(), cfg.Timeout)
+					}
+					defer cancel()
+					if _, err := engine.ResumeSession(callCtx, st.Run.ThreadID); err != nil {
+						errCode, errMsg, _ := codex.MapCodexError(err)
+						if errCode == "" {
+							errCode = "AX_ENGINE_INTERNAL"
+						}
+						if errMsg == "" {
+							errMsg = err.Error()
+						}
+						st.Run.ErrorCode = errCode
+						st.Run.ErrorSummary = errMsg
+						st.Run.RecoverHint = "codex resume failed; use --strategy rerun or check codex server"
+						st.SetLastError(errCode, errMsg, now)
+						if saveErr := st.Save(wd); saveErr != nil {
+							return saveErr
+						}
+						return errors.New(errMsg)
+					}
 					if _, err := restoreRuntimeCheckpoint(wd, st); err != nil {
 						return err
 					}
-					if !st.TDD.Enabled {
-						return errors.New("recover resume unavailable: no persisted tdd state")
-					}
 				}
 				_ = appendRuntimeJournal(wd, runtimeJournalEntry{
-					Time:      now.Format(time.RFC3339),
-					SessionID: st.Runtime.SessionID,
-					ClusterID: st.Runtime.ClusterID,
-					NodeID:    st.Runtime.NodeID,
-					Command:   "recover",
-					Stage:     "start",
-					Mode:      string(st.Runtime.Mode),
-					Phase:     string(st.Phase),
+					Time:       now.Format(time.RFC3339),
+					SessionID:  st.Runtime.SessionID,
+					ClusterID:  st.Runtime.ClusterID,
+					NodeID:     st.Runtime.NodeID,
+					Command:    "recover",
+					Stage:      "start",
+					Mode:       string(st.Runtime.Mode),
+					Phase:      string(st.Phase),
+					ThreadID:   st.Run.ThreadID,
+					TurnID:     st.Run.ActiveTurnID,
+					EngineMode: st.Run.EngineMode,
 				})
 				st.Run.LastFailureCause = ""
 				st.Run.ErrorCode = ""
 				st.Run.ErrorSummary = ""
 				st.Run.RecoverHint = ""
 				st.Run.Blocked = false
+				st.Run.ActiveTurnID = ""
 				if resolvedMode == "rerun" {
 					st.Run.LastFailedStep = ""
 					st.Run.RetryAttempts = 0
@@ -490,15 +532,18 @@ func newRecoverCmd() *cobra.Command {
 					return err
 				}
 				_ = appendRuntimeJournal(wd, runtimeJournalEntry{
-					Time:      time.Now().Format(time.RFC3339),
-					SessionID: st.Runtime.SessionID,
-					ClusterID: st.Runtime.ClusterID,
-					NodeID:    st.Runtime.NodeID,
-					Command:   "recover",
-					Stage:     "completed",
-					Mode:      string(st.Runtime.Mode),
-					Phase:     string(st.Phase),
-					Artifact:  st.Runtime.SessionJournal,
+					Time:       time.Now().Format(time.RFC3339),
+					SessionID:  st.Runtime.SessionID,
+					ClusterID:  st.Runtime.ClusterID,
+					NodeID:     st.Runtime.NodeID,
+					Command:    "recover",
+					Stage:      "completed",
+					Mode:       string(st.Runtime.Mode),
+					Phase:      string(st.Phase),
+					Artifact:   st.Runtime.SessionJournal,
+					ThreadID:   st.Run.ThreadID,
+					TurnID:     st.Run.ActiveTurnID,
+					EngineMode: st.Run.EngineMode,
 				})
 				fmt.Fprintf(cmd.OutOrStdout(), "recover: strategy=%s session=%s phase=%s\n", resolvedMode, st.Runtime.SessionID, st.Phase)
 				return nil
@@ -532,6 +577,21 @@ func newDoctorCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				codexCfg := codex.ResolveConfig()
+				codexReachable := false
+				if strings.TrimSpace(st.Run.ThreadID) != "" {
+					engine, err := codex.NewAdapter(codexCfg)
+					if err == nil {
+						callCtx := context.Background()
+						cancel := func() {}
+						if codexCfg.Timeout > 0 {
+							callCtx, cancel = context.WithTimeout(context.Background(), codexCfg.Timeout)
+						}
+						_, reachErr := engine.GetThread(callCtx, st.Run.ThreadID)
+						cancel()
+						codexReachable = reachErr == nil
+					}
+				}
 				lockDir := filepath.Join(wd, ".ax", "locks")
 				entries, _ := os.ReadDir(lockDir)
 				payload := map[string]any{
@@ -544,6 +604,12 @@ func newDoctorCmd() *cobra.Command {
 					"active_sessions": len(st.Runtime.ActiveSessions),
 					"lock_files":      len(entries),
 					"state_file":      filepath.ToSlash(filepath.Join(".ax", "state.yaml")),
+					"engine_mode":     emptyFallback(st.Run.EngineMode),
+					"thread_id":       emptyFallback(st.Run.ThreadID),
+					"active_turn_id":  emptyFallback(st.Run.ActiveTurnID),
+					"turn_count":      len(st.Run.TurnHistory),
+					"codex_bin":       codexCfg.BinPath,
+					"codex_reachable": codexReachable,
 				}
 				if jsonOut {
 					body, err := json.MarshalIndent(payload, "", "  ")
@@ -560,6 +626,12 @@ func newDoctorCmd() *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "node id: %s\n", emptyFallback(fmt.Sprint(payload["node_id"])))
 				fmt.Fprintf(cmd.OutOrStdout(), "journal path: %s\n", emptyFallback(fmt.Sprint(payload["journal_path"])))
 				fmt.Fprintf(cmd.OutOrStdout(), "active sessions: %d\n", payload["active_sessions"])
+				fmt.Fprintf(cmd.OutOrStdout(), "engine mode: %s\n", emptyFallback(fmt.Sprint(payload["engine_mode"])))
+				fmt.Fprintf(cmd.OutOrStdout(), "thread id: %s\n", emptyFallback(fmt.Sprint(payload["thread_id"])))
+				fmt.Fprintf(cmd.OutOrStdout(), "active turn id: %s\n", emptyFallback(fmt.Sprint(payload["active_turn_id"])))
+				fmt.Fprintf(cmd.OutOrStdout(), "turn count: %d\n", payload["turn_count"])
+				fmt.Fprintf(cmd.OutOrStdout(), "codex bin: %s\n", emptyFallback(fmt.Sprint(payload["codex_bin"])))
+				fmt.Fprintf(cmd.OutOrStdout(), "codex reachable: %t\n", payload["codex_reachable"])
 				fmt.Fprintf(cmd.OutOrStdout(), "lock files: %d\n", payload["lock_files"])
 				fmt.Fprintf(cmd.OutOrStdout(), "state file: %s\n", payload["state_file"])
 				return nil
@@ -816,14 +888,21 @@ type tuiEngine struct {
 	SessionID      string            `json:"session_id"`
 	ClusterID      string            `json:"cluster_id"`
 	NodeID         string            `json:"node_id"`
+	ThreadID       string            `json:"thread_id,omitempty"`
+	ActiveTurnID   string            `json:"active_turn_id,omitempty"`
+	TurnCount      int               `json:"turn_count"`
+	CodexMode      string            `json:"codex_mode,omitempty"`
 	ActiveSessions map[string]string `json:"active_sessions"`
 }
 
 type journalBrief struct {
-	Time    string `json:"time"`
-	Command string `json:"command"`
-	Stage   string `json:"stage"`
-	Phase   string `json:"phase"`
+	Time     string `json:"time"`
+	Command  string `json:"command"`
+	Stage    string `json:"stage"`
+	Phase    string `json:"phase"`
+	ThreadID string `json:"thread_id,omitempty"`
+	TurnID   string `json:"turn_id,omitempty"`
+	Step     string `json:"step,omitempty"`
 }
 
 func buildTUISnapshot(base string, refresh int, now time.Time) (tuiSnapshot, error) {
@@ -851,6 +930,10 @@ func buildTUISnapshot(base string, refresh int, now time.Time) (tuiSnapshot, err
 			SessionID:      st.Runtime.SessionID,
 			ClusterID:      st.Runtime.ClusterID,
 			NodeID:         st.Runtime.NodeID,
+			ThreadID:       st.Run.ThreadID,
+			ActiveTurnID:   st.Run.ActiveTurnID,
+			TurnCount:      len(st.Run.TurnHistory),
+			CodexMode:      st.Run.EngineMode,
 			ActiveSessions: st.Runtime.ActiveSessions,
 		},
 		CurrentArtifacts: map[string]string{
@@ -924,10 +1007,13 @@ func buildTUISnapshot(base string, refresh int, now time.Time) (tuiSnapshot, err
 	if entries, err := readRuntimeJournalRecent(base, 5); err == nil {
 		for _, entry := range entries {
 			snap.RuntimeJournal = append(snap.RuntimeJournal, journalBrief{
-				Time:    entry.Time,
-				Command: entry.Command,
-				Stage:   entry.Stage,
-				Phase:   entry.Phase,
+				Time:     entry.Time,
+				Command:  entry.Command,
+				Stage:    entry.Stage,
+				Phase:    entry.Phase,
+				ThreadID: entry.ThreadID,
+				TurnID:   entry.TurnID,
+				Step:     entry.Step,
 			})
 		}
 	}
@@ -1009,11 +1095,15 @@ func renderTUISnapshotMarkdown(snap tuiSnapshot) string {
 		}
 	}
 	b.WriteString("\n## Screen E Engine\n")
-	b.WriteString(fmt.Sprintf("- runtime_mode: %s\n- session_id: %s\n- cluster_id: %s\n- node_id: %s\n",
+	b.WriteString(fmt.Sprintf("- runtime_mode: %s\n- session_id: %s\n- cluster_id: %s\n- node_id: %s\n- thread_id: %s\n- active_turn_id: %s\n- turn_count: %d\n- codex_mode: %s\n",
 		emptyFallback(snap.Engine.RuntimeMode),
 		emptyFallback(snap.Engine.SessionID),
 		emptyFallback(snap.Engine.ClusterID),
 		emptyFallback(snap.Engine.NodeID),
+		emptyFallback(snap.Engine.ThreadID),
+		emptyFallback(snap.Engine.ActiveTurnID),
+		snap.Engine.TurnCount,
+		emptyFallback(snap.Engine.CodexMode),
 	))
 	return b.String()
 }
@@ -1225,7 +1315,7 @@ func createPlan(base, from string, rt runtimeContext, now time.Time) (string, er
 	return planFile, nil
 }
 
-func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Time) (string, int, error) {
+func runPlan(base, plan string, opts runOptions, rt runtimeContext, engine codex.AppServerAdapter, codexCfg codex.ClientConfig, now time.Time) (string, int, error) {
 	planPath, planID, err := resolvePlan(base, plan)
 	if err != nil {
 		return "", 0, err
@@ -1299,8 +1389,61 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 	failLog := filepath.Join(base, ".ax", "logs", fmt.Sprintf("%s-%s-fail.yaml", sanitizeToken(planID), now.Format("20060102-150405")))
 	compactionLog := filepath.Join(base, ".ax", "logs", fmt.Sprintf("%s-%s-compaction.yaml", sanitizeToken(planID), now.Format("20060102-150405")))
 
-	threadID := syntheticThreadID(st.Runtime.SessionID + "-" + planID)
-	if err := writeObservabilityLog(startLog, "run_start", string(core.PhaseImplementation), threadID, "", "", "run scaffolding started", now); err != nil {
+	callCtx := context.Background()
+	cancel := func() {}
+	if codexCfg.Timeout > 0 {
+		callCtx, cancel = context.WithTimeout(context.Background(), codexCfg.Timeout)
+	}
+	defer cancel()
+
+	var thread *codex.Thread
+	if opts.resume && strings.TrimSpace(st.Run.ThreadID) != "" {
+		thread, err = engine.ResumeSession(callCtx, strings.TrimSpace(st.Run.ThreadID))
+	} else {
+		thread, err = engine.CreateThread(callCtx, planID)
+	}
+	if err != nil {
+		errCode, errMsg, _ := codex.MapCodexError(err)
+		if errCode == "" {
+			errCode = "AX_ENGINE_INTERNAL"
+		}
+		if errMsg == "" {
+			errMsg = err.Error()
+		}
+		st.Run.ErrorCode = errCode
+		st.Run.ErrorSummary = errMsg
+		st.Run.RecoverHint = "check codex app-server and retry with `ax run --resume`"
+		st.SetLastError(errCode, errMsg, now)
+		if saveErr := st.Save(base); saveErr != nil {
+			return "", 0, saveErr
+		}
+		return "", 0, errors.New(errMsg)
+	}
+	threadID := strings.TrimSpace(thread.ID)
+	if threadID == "" {
+		threadID = syntheticThreadID(st.Runtime.SessionID + "-" + planID)
+	}
+	st.Run.ThreadID = threadID
+	st.Run.EngineMode = strings.TrimSpace(codexCfg.Mode)
+	if st.Run.EngineMode == "" {
+		st.Run.EngineMode = codex.DefaultMode
+	}
+	if err := writeObservabilityLog(startLog, "run_start", string(core.PhaseImplementation), threadID, "", "", "run started", now, 0, st.Run.EngineMode); err != nil {
+		return "", 0, err
+	}
+	if err := appendRuntimeJournal(base, runtimeJournalEntry{
+		Time:       now.Format(time.RFC3339),
+		SessionID:  st.Runtime.SessionID,
+		ClusterID:  st.Runtime.ClusterID,
+		NodeID:     st.Runtime.NodeID,
+		Command:    "run",
+		Stage:      "thread_ready",
+		Mode:       string(st.Runtime.Mode),
+		Phase:      string(st.Phase),
+		PlanID:     planID,
+		ThreadID:   threadID,
+		EngineMode: st.Run.EngineMode,
+	}); err != nil {
 		return "", 0, err
 	}
 
@@ -1312,6 +1455,10 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 	st.Run.RecoverHint = "ax run --resume"
 	st.Run.RetryLimit = retryLimit
 	st.Run.Blocked = false
+	st.Run.ActiveTurnID = ""
+	if !opts.resume {
+		st.Run.TurnHistory = nil
+	}
 	if opts.tdd && !opts.resume {
 		st.TDD = core.TDDState{
 			Enabled:        true,
@@ -1336,16 +1483,18 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 		return "", 0, err
 	}
 	if err := appendRuntimeJournal(base, runtimeJournalEntry{
-		Time:      time.Now().Format(time.RFC3339),
-		SessionID: st.Runtime.SessionID,
-		ClusterID: st.Runtime.ClusterID,
-		NodeID:    st.Runtime.NodeID,
-		Command:   "run",
-		Stage:     "checkpoint",
-		Mode:      string(st.Runtime.Mode),
-		Phase:     string(st.Phase),
-		PlanID:    planID,
-		Artifact:  filepath.ToSlash(filepath.Join(".ax", "state.yaml")),
+		Time:       time.Now().Format(time.RFC3339),
+		SessionID:  st.Runtime.SessionID,
+		ClusterID:  st.Runtime.ClusterID,
+		NodeID:     st.Runtime.NodeID,
+		Command:    "run",
+		Stage:      "checkpoint",
+		Mode:       string(st.Runtime.Mode),
+		Phase:      string(st.Phase),
+		PlanID:     planID,
+		Artifact:   filepath.ToSlash(filepath.Join(".ax", "state.yaml")),
+		ThreadID:   threadID,
+		EngineMode: st.Run.EngineMode,
 	}); err != nil {
 		return "", 0, err
 	}
@@ -1380,13 +1529,21 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 		if evalErr != nil {
 			return "", 0, evalErr
 		}
+		interruptTurnID := strings.TrimSpace(st.Run.ActiveTurnID)
+		if interruptTurnID == "" {
+			interruptTurnID = strings.TrimSpace(startTurnID)
+		}
+		if interruptTurnID != "" {
+			_, _ = engine.InterruptTurn(callCtx, threadID, interruptTurnID)
+		}
+		st.Run.ActiveTurnID = ""
 		errCode := "E_RUN_REJECTED"
 		errMsg := "run rejected by decision gate"
 		if rejectPolicy.Required {
 			errCode = approvalRequiredCode
 			errMsg = fmt.Sprintf("run rejected: approval required by policy (%s)", rejectPolicy.Reason)
 		}
-		if err := writeObservabilityLog(failLog, "run_reject", string(core.PhaseImplementation), threadID, startTurnID, errCode, errMsg, now); err != nil {
+		if err := writeObservabilityLog(failLog, "run_reject", string(core.PhaseImplementation), threadID, interruptTurnID, errCode, errMsg, now, 0, st.Run.EngineMode); err != nil {
 			return "", 0, err
 		}
 		st.Run.RetryAttempts++
@@ -1412,17 +1569,20 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 		}
 		_ = writeRuntimeCheckpoint(base, st, "failed", "run", time.Now())
 		_ = appendRuntimeJournal(base, runtimeJournalEntry{
-			Time:      time.Now().Format(time.RFC3339),
-			SessionID: st.Runtime.SessionID,
-			ClusterID: st.Runtime.ClusterID,
-			NodeID:    st.Runtime.NodeID,
-			Command:   "run",
-			Stage:     "failed",
-			Mode:      string(st.Runtime.Mode),
-			Phase:     string(st.Phase),
-			PlanID:    planID,
-			ErrorCode: errCode,
-			Error:     errMsg,
+			Time:       time.Now().Format(time.RFC3339),
+			SessionID:  st.Runtime.SessionID,
+			ClusterID:  st.Runtime.ClusterID,
+			NodeID:     st.Runtime.NodeID,
+			Command:    "run",
+			Stage:      "failed",
+			Mode:       string(st.Runtime.Mode),
+			Phase:      string(st.Phase),
+			PlanID:     planID,
+			ErrorCode:  errCode,
+			Error:      errMsg,
+			ThreadID:   threadID,
+			TurnID:     st.Run.ActiveTurnID,
+			EngineMode: st.Run.EngineMode,
 		})
 		return "", 0, errors.New(errMsg)
 	}
@@ -1457,6 +1617,146 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 		}
 	}
 	contextLayers := core.BuildContextLayers(base, st.ContextChain, affected)
+	for i := range stepTurn {
+		stepStart := time.Now()
+		step := stepTurn[i]
+		st.Run.ActiveTurnID = strings.TrimSpace(step.TurnID)
+		prompt := codex.BuildStepPrompt(step.Step, string(body), contextLayers)
+		var (
+			turn    *codex.Turn
+			turnErr error
+		)
+		if decision == "steer" {
+			lastTurnID := ""
+			if len(st.Run.TurnHistory) > 0 {
+				lastTurnID = strings.TrimSpace(st.Run.TurnHistory[len(st.Run.TurnHistory)-1].TurnID)
+			}
+			if lastTurnID != "" {
+				turn, turnErr = engine.SteerTurn(callCtx, threadID, lastTurnID, strings.TrimSpace(opts.steerText))
+			} else {
+				turn, turnErr = engine.RunTurn(callCtx, threadID, prompt+"\n\nsteer_instruction: "+strings.TrimSpace(opts.steerText))
+			}
+		} else {
+			// Use streaming path for last step in real mode, otherwise simple RunTurn.
+			if i == len(stepTurn)-1 && strings.EqualFold(st.Run.EngineMode, "real") {
+				events, streamErr := engine.StreamTurn(callCtx, threadID, prompt)
+				if streamErr != nil {
+					turnErr = streamErr
+				} else {
+					lastTurnID := ""
+					for evt := range events {
+						if strings.TrimSpace(evt.TurnID) != "" {
+							lastTurnID = strings.TrimSpace(evt.TurnID)
+						}
+					}
+					if lastTurnID == "" {
+						lastTurnID = fmt.Sprintf("stream-%03d", i+1)
+					}
+					turn = &codex.Turn{
+						ID:        lastTurnID,
+						ThreadID:  threadID,
+						Role:      "assistant",
+						Content:   "stream:completed",
+						CreatedAt: time.Now().UTC().Format(time.RFC3339),
+					}
+				}
+			} else {
+				turn, turnErr = engine.RunTurn(callCtx, threadID, prompt)
+			}
+		}
+		if turnErr != nil {
+			errCode, errMsg, retryable := codex.MapCodexError(turnErr)
+			if errCode == "" {
+				errCode = "AX_ENGINE_INTERNAL"
+			}
+			if errMsg == "" {
+				errMsg = turnErr.Error()
+			}
+			st.Run.RetryAttempts++
+			st.Run.LastFailedStep = step.Step
+			st.Run.LastFailureCause = "codex turn failed"
+			st.Run.ErrorCode = errCode
+			st.Run.ErrorSummary = errMsg
+			st.Run.RetryLimit = retryLimit
+			if retryable {
+				st.Run.RecoverHint = fmt.Sprintf("retryable engine failure: run `ax run --plan %s --resume --retry %d`", planID, retryLimit)
+			} else {
+				st.Run.RecoverHint = fmt.Sprintf("fix root cause then run `ax run --plan %s --resume`", planID)
+			}
+			if st.Run.RetryAttempts > retryLimit {
+				st.Run.Blocked = true
+				st.Run.ErrorCode = "E_RUN_BLOCKED"
+				st.Run.ErrorSummary = fmt.Sprintf("retry attempts exceeded (%d>%d)", st.Run.RetryAttempts, retryLimit)
+				st.Run.RecoverHint = "unblock by increasing --retry (0..5) or reset state after fixing root cause"
+				errCode = "E_RUN_BLOCKED"
+				errMsg = st.Run.ErrorSummary
+			}
+			st.SetLastError(errCode, errMsg, now)
+			st.SetLastResult("run", "failed", filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(failLog))), now)
+			_ = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(failLog))))
+			turnID := strings.TrimSpace(st.Run.ActiveTurnID)
+			if err := writeObservabilityLog(failLog, "run_turn_failed", string(core.PhaseImplementation), threadID, turnID, errCode, errMsg, now, time.Since(stepStart).Milliseconds(), st.Run.EngineMode); err != nil {
+				return "", 0, err
+			}
+			if err := st.Save(base); err != nil {
+				return "", 0, err
+			}
+			_ = writeRuntimeCheckpoint(base, st, "failed", "run", time.Now())
+			_ = appendRuntimeJournal(base, runtimeJournalEntry{
+				Time:       time.Now().Format(time.RFC3339),
+				SessionID:  st.Runtime.SessionID,
+				ClusterID:  st.Runtime.ClusterID,
+				NodeID:     st.Runtime.NodeID,
+				Command:    "run",
+				Stage:      "failed",
+				Mode:       string(st.Runtime.Mode),
+				Phase:      string(st.Phase),
+				PlanID:     planID,
+				ErrorCode:  errCode,
+				Error:      errMsg,
+				ThreadID:   threadID,
+				TurnID:     turnID,
+				Step:       step.Step,
+				DurationMS: time.Since(stepStart).Milliseconds(),
+				EngineMode: st.Run.EngineMode,
+			})
+			return "", 0, errors.New(errMsg)
+		}
+		turnID := strings.TrimSpace(turn.ID)
+		if turnID == "" {
+			turnID = step.TurnID
+		}
+		if turnID == "" {
+			turnID = fmt.Sprintf("turn-%03d", i+1)
+		}
+		stepTurn[i].TurnID = turnID
+		stepTurn[i].Tier = step.Tier
+		st.Run.ActiveTurnID = ""
+		st.AppendTurnRef(core.TurnRef{
+			TurnID:    turnID,
+			Step:      step.Step,
+			Status:    "completed",
+			StartedAt: stepStart.UTC().Format(time.RFC3339),
+			EndedAt:   time.Now().UTC().Format(time.RFC3339),
+		}, 100)
+		_ = appendRuntimeJournal(base, runtimeJournalEntry{
+			Time:       time.Now().Format(time.RFC3339),
+			SessionID:  st.Runtime.SessionID,
+			ClusterID:  st.Runtime.ClusterID,
+			NodeID:     st.Runtime.NodeID,
+			Command:    "run",
+			Stage:      "turn_completed",
+			Mode:       string(st.Runtime.Mode),
+			Phase:      string(st.Phase),
+			PlanID:     planID,
+			ThreadID:   threadID,
+			TurnID:     turnID,
+			Step:       step.Step,
+			DurationMS: time.Since(stepStart).Milliseconds(),
+			EngineMode: st.Run.EngineMode,
+		})
+	}
+	startTurnID, endTurnID = firstLastTurnID(stepTurn)
 
 	pendingContext := []string{
 		filepath.ToSlash(filepath.Join(".ax", "runs", runName)),
@@ -1474,6 +1774,9 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 	report.WriteString(fmt.Sprintf("- executed_at: %s\n", now.Format(time.RFC3339)))
 	report.WriteString(fmt.Sprintf("- runtime_mode: %s\n", st.Runtime.Mode))
 	report.WriteString(fmt.Sprintf("- session_id: %s\n", st.Runtime.SessionID))
+	report.WriteString(fmt.Sprintf("- codex_engine_mode: %s\n", emptyFallback(st.Run.EngineMode)))
+	report.WriteString(fmt.Sprintf("- thread_id: %s\n", emptyFallback(st.Run.ThreadID)))
+	report.WriteString(fmt.Sprintf("- turn_count: %d\n", len(st.Run.TurnHistory)))
 	report.WriteString(fmt.Sprintf("- detected_tasks: %d\n", taskCount))
 	report.WriteString(fmt.Sprintf("- approval_policy: %s\n", opts.approval))
 	report.WriteString(fmt.Sprintf("- approval_required: %t\n", approvalPolicy.Required))
@@ -1550,7 +1853,7 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 		return "", 0, err
 	}
 
-	if err := writeObservabilityLog(endLog, "run_end", string(core.PhaseImplementation), threadID, endTurnID, "", "run scaffolding completed", now); err != nil {
+	if err := writeObservabilityLog(endLog, "run_end", string(core.PhaseImplementation), threadID, endTurnID, "", "run completed", now, 0, st.Run.EngineMode); err != nil {
 		return "", 0, err
 	}
 
@@ -1569,6 +1872,7 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 	st.Run.RetryAttempts = 0
 	st.Run.Blocked = false
 	st.Run.RetryLimit = retryLimit
+	st.Run.ActiveTurnID = ""
 	compactionTriggered = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "runs", runName))) || compactionTriggered
 	compactionTriggered = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(startLog)))) || compactionTriggered
 	compactionTriggered = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(endLog)))) || compactionTriggered
@@ -1576,7 +1880,7 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 		compactionTriggered = st.AddContext(filepath.ToSlash(filepath.Join(worktreeRel, "worktree.yaml"))) || compactionTriggered
 	}
 	if compactionTriggered {
-		if err := writeObservabilityLog(compactionLog, "context_compaction", string(core.PhaseImplementation), "", "", contextCompactionCode, fmt.Sprintf("context_chain exceeded max=%d and was compacted", core.MaxContextChainEntries), now); err != nil {
+		if err := writeObservabilityLog(compactionLog, "context_compaction", string(core.PhaseImplementation), threadID, endTurnID, contextCompactionCode, fmt.Sprintf("context_chain exceeded max=%d and was compacted", core.MaxContextChainEntries), now, 0, st.Run.EngineMode); err != nil {
 			return "", 0, err
 		}
 		_ = st.AddContext(filepath.ToSlash(filepath.Join(".ax", "logs", filepath.Base(compactionLog))))
@@ -1590,16 +1894,20 @@ func runPlan(base, plan string, opts runOptions, rt runtimeContext, now time.Tim
 		return "", 0, err
 	}
 	_ = appendRuntimeJournal(base, runtimeJournalEntry{
-		Time:      time.Now().Format(time.RFC3339),
-		SessionID: st.Runtime.SessionID,
-		ClusterID: st.Runtime.ClusterID,
-		NodeID:    st.Runtime.NodeID,
-		Command:   "run",
-		Stage:     "completed",
-		Mode:      string(st.Runtime.Mode),
-		Phase:     string(st.Phase),
-		PlanID:    planID,
-		Artifact:  filepath.ToSlash(filepath.Join(".ax", "runs", runName)),
+		Time:       time.Now().Format(time.RFC3339),
+		SessionID:  st.Runtime.SessionID,
+		ClusterID:  st.Runtime.ClusterID,
+		NodeID:     st.Runtime.NodeID,
+		Command:    "run",
+		Stage:      "completed",
+		Mode:       string(st.Runtime.Mode),
+		Phase:      string(st.Phase),
+		PlanID:     planID,
+		Artifact:   filepath.ToSlash(filepath.Join(".ax", "runs", runName)),
+		ThreadID:   threadID,
+		TurnID:     endTurnID,
+		DurationMS: time.Since(now).Milliseconds(),
+		EngineMode: st.Run.EngineMode,
 	})
 
 	return runPath, taskCount, nil
@@ -2547,12 +2855,14 @@ func writeAuditItems(b *strings.Builder, items []core.GotchaItem) {
 	}
 }
 
-func writeObservabilityLog(path, step, phase, threadID, turnID, errorCode, message string, at time.Time) error {
+func writeObservabilityLog(path, step, phase, threadID, turnID, errorCode, message string, at time.Time, durationMS int64, engineMode string) error {
 	payload := strings.Join([]string{
 		"step: " + step,
 		"phase: " + phase,
 		"thread_id: " + emptyFallback(threadID),
 		"turn_id: " + emptyFallback(turnID),
+		"duration_ms: " + fmt.Sprintf("%d", durationMS),
+		"engine_mode: " + emptyFallback(engineMode),
 		"error_code: " + emptyFallback(errorCode),
 		"time: " + at.Format(time.RFC3339),
 		"message: " + message,
@@ -2666,18 +2976,23 @@ func restoreRuntimeCheckpoint(base string, st *core.State) (runtimeCheckpoint, e
 }
 
 type runtimeJournalEntry struct {
-	Time      string `json:"time"`
-	SessionID string `json:"session_id"`
-	ClusterID string `json:"cluster_id,omitempty"`
-	NodeID    string `json:"node_id,omitempty"`
-	Command   string `json:"command"`
-	Stage     string `json:"stage"`
-	Mode      string `json:"mode,omitempty"`
-	Phase     string `json:"phase,omitempty"`
-	PlanID    string `json:"plan_id,omitempty"`
-	Artifact  string `json:"artifact,omitempty"`
-	ErrorCode string `json:"error_code,omitempty"`
-	Error     string `json:"error,omitempty"`
+	Time       string `json:"time"`
+	SessionID  string `json:"session_id"`
+	ClusterID  string `json:"cluster_id,omitempty"`
+	NodeID     string `json:"node_id,omitempty"`
+	Command    string `json:"command"`
+	Stage      string `json:"stage"`
+	Mode       string `json:"mode,omitempty"`
+	Phase      string `json:"phase,omitempty"`
+	PlanID     string `json:"plan_id,omitempty"`
+	Artifact   string `json:"artifact,omitempty"`
+	ErrorCode  string `json:"error_code,omitempty"`
+	Error      string `json:"error,omitempty"`
+	ThreadID   string `json:"thread_id,omitempty"`
+	TurnID     string `json:"turn_id,omitempty"`
+	Step       string `json:"step,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+	EngineMode string `json:"engine_mode,omitempty"`
 }
 
 func runtimeJournalPath(base string) string {
