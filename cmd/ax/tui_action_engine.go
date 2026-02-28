@@ -33,6 +33,9 @@ func performTUIEngineAction(st *core.State, action string, now time.Time) (threa
 	if err != nil {
 		return "", "", err
 	}
+	if closer, ok := engine.(interface{ Close() error }); ok {
+		defer func() { _ = closer.Close() }()
+	}
 
 	callCtx, cancel := codexCallContext(cfg.Timeout)
 	defer cancel()

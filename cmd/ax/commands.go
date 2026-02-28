@@ -158,6 +158,9 @@ func newRunCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				if closer, ok := engine.(interface{ Close() error }); ok {
+					defer func() { _ = closer.Close() }()
+				}
 
 				runFile, taskCount, err := runPlan(wd, plan, runOptions{
 					tdd:         tdd,
@@ -475,6 +478,9 @@ func newRecoverCmd() *cobra.Command {
 					if err != nil {
 						return err
 					}
+					if closer, ok := engine.(interface{ Close() error }); ok {
+						defer func() { _ = closer.Close() }()
+					}
 					callCtx := context.Background()
 					cancel := func() {}
 					if cfg.Timeout > 0 {
@@ -582,6 +588,9 @@ func newDoctorCmd() *cobra.Command {
 				if strings.TrimSpace(st.Run.ThreadID) != "" {
 					engine, err := codex.NewAdapter(codexCfg)
 					if err == nil {
+						if closer, ok := engine.(interface{ Close() error }); ok {
+							defer func() { _ = closer.Close() }()
+						}
 						callCtx := context.Background()
 						cancel := func() {}
 						if codexCfg.Timeout > 0 {

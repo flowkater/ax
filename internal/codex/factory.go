@@ -75,7 +75,11 @@ func NewAdapter(cfg ClientConfig) (AppServerAdapter, error) {
 	if bin == "" {
 		bin = DefaultBinPath
 	}
-	client := NewStdioClient(bin, cfg.Args...)
+	args := cfg.Args
+	if len(args) == 0 {
+		args = []string{"app-server"}
+	}
+	client := NewStdioClient(bin, args...)
 	client.timeout = cfg.Timeout
 	client.retries = cfg.Retries
 	return client, nil

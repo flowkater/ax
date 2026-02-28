@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -2093,15 +2094,7 @@ func TestHelperProcessCodexServerAX(t *testing.T) {
 		return
 	}
 
-	var req codex.JSONRPCRequest
-	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
-		_ = json.NewEncoder(os.Stdout).Encode(codex.JSONRPCResponse{
-			JSONRPC: "2.0",
-			ID:      "0",
-			Error:   &codex.JSONRPCErrorObj{Code: -32700, Message: "parse error"},
-		})
-		os.Exit(0)
-	}
+	decoder := json.NewDecoder(os.Stdin)
 	write := func(v any) {
 		_ = json.NewEncoder(os.Stdout).Encode(v)
 	}
@@ -2130,75 +2123,143 @@ func TestHelperProcessCodexServerAX(t *testing.T) {
 		return strings.Contains(prompt, "step: "+marker)
 	}
 
-	switch req.Method {
-	case "thread/start":
-		threadID := "th-real-1"
-		if emptyThreadID {
-			threadID = ""
+	initialized := false
+	for {
+		var req codex.JSONRPCRequest
+		if err := decoder.Decode(&req); err != nil {
+			if errors.Is(err, io.EOF) {
+				os.Exit(0)
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(codex.JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      "0",
+				Error:   &codex.JSONRPCErrorObj{Code: -32700, Message: "parse error"},
+			})
+			os.Exit(0)
 		}
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: threadID, Title: "real", CreatedAt: "2026-02-26T00:00:00Z"}})
-	case "thread/resume":
-		threadID := "th-real-1"
-		if emptyThreadID {
-			threadID = ""
+
+		switch req.Method {
+		case "initialize":
+			initialized = true
+			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"userAgent": "ax-test"}})
+			continue
+		case "initialized":
+			// notification only
+			continue
 		}
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: threadID, Title: "resumed", CreatedAt: "2026-02-26T00:00:01Z"}})
-	case "thread/read":
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: "th-real-1", Title: "health", CreatedAt: "2026-02-26T00:00:02Z"}})
-	case "thread/fork":
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: "th-real-fork-1", Title: "forked", CreatedAt: "2026-02-26T00:00:02Z"}})
-	case "thread/rollback":
-		params, _ := req.Params.(map[string]any)
-		threadID, _ := params["thread_id"].(string)
-		if strings.TrimSpace(threadID) == "" {
-			threadID = "th-real-1"
+
+		if !initialized {
+			write(codex.JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Error:   &codex.JSONRPCErrorObj{Code: -32600, Message: "Not initialized"},
+			})
+			continue
 		}
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Thread{ID: threadID, Title: "rolled-back", CreatedAt: "2026-02-26T00:00:02Z"}})
-	case "turn/start":
-		params, _ := req.Params.(map[string]any)
-		prompt, _ := params["prompt"].(string)
-		stream, _ := params["stream"].(bool)
-		if delayAllTurnMillis > 0 {
-			time.Sleep(time.Duration(delayAllTurnMillis) * time.Millisecond)
-		}
-		if delayMillis > 0 && ((delayReqID != "" && req.ID == delayReqID) || shouldApplyToPrompt(prompt, delayStep)) {
-			time.Sleep(time.Duration(delayMillis) * time.Millisecond)
-		}
-		if stream {
-			turnID := "tu-stream-" + req.ID
+
+		switch req.Method {
+		case "thread/start":
+			threadID := "th-real-1"
+			if emptyThreadID {
+				threadID = ""
+			}
+			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+				"thread": codex.Thread{ID: threadID, Title: "real", CreatedAt: "2026-02-26T00:00:00Z"},
+			}})
+		case "thread/resume":
+			threadID := "th-real-1"
+			if emptyThreadID {
+				threadID = ""
+			}
+			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+				"thread": codex.Thread{ID: threadID, Title: "resumed", CreatedAt: "2026-02-26T00:00:01Z"},
+			}})
+		case "thread/read":
+			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+				"thread": codex.Thread{ID: "th-real-1", Title: "health", CreatedAt: "2026-02-26T00:00:02Z"},
+			}})
+		case "thread/fork":
+			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+				"thread": codex.Thread{ID: "th-real-fork-1", Title: "forked", CreatedAt: "2026-02-26T00:00:02Z"},
+			}})
+		case "thread/rollback":
+			params, _ := req.Params.(map[string]any)
+			threadID, _ := params["thread_id"].(string)
+			if strings.TrimSpace(threadID) == "" {
+				threadID, _ = params["threadId"].(string)
+			}
+			if strings.TrimSpace(threadID) == "" {
+				threadID = "th-real-1"
+			}
+			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+				"thread": codex.Thread{ID: threadID, Title: "rolled-back", CreatedAt: "2026-02-26T00:00:02Z"},
+			}})
+		case "turn/start":
+			params, _ := req.Params.(map[string]any)
+			prompt := extractPromptFromTurnStartParams(params)
+			stream, _ := params["stream"].(bool)
+			if delayAllTurnMillis > 0 {
+				time.Sleep(time.Duration(delayAllTurnMillis) * time.Millisecond)
+			}
+			if delayMillis > 0 && ((delayReqID != "" && req.ID == delayReqID) || shouldApplyToPrompt(prompt, delayStep)) {
+				time.Sleep(time.Duration(delayMillis) * time.Millisecond)
+			}
+			if stream {
+				turnID := "tu-stream-" + req.ID
+				if emptyTurnID {
+					turnID = ""
+				}
+				write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: []codex.StreamEvent{
+					{Type: codex.StreamEventDelta, ThreadID: "th-real-1", TurnID: turnID, Delta: "hello"},
+					{Type: codex.StreamEventCompleted, ThreadID: "th-real-1", TurnID: turnID, Completed: true},
+				}})
+				break
+			}
+			turnID := "tu-run-" + req.ID
+			if strings.Contains(prompt, "steer_instruction:") {
+				turnID = "tu-steer-bootstrap-" + req.ID
+			}
+			if emptyTurnID || shouldApplyToPrompt(prompt, emptyTurnStep) {
+				turnID = ""
+			}
+			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+				"turn": codex.Turn{ID: turnID, ThreadID: "th-real-1", Role: "assistant", Content: "ok", CreatedAt: "2026-02-26T00:00:03Z"},
+			}})
+		case "review/start":
+			turnID := "tu-steer-" + req.ID
 			if emptyTurnID {
 				turnID = ""
 			}
-			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: []codex.StreamEvent{
-				{Type: codex.StreamEventDelta, ThreadID: "th-real-1", TurnID: turnID, Delta: "hello"},
-				{Type: codex.StreamEventCompleted, ThreadID: "th-real-1", TurnID: turnID, Completed: true},
+			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+				"turn": codex.Turn{ID: turnID, ThreadID: "th-real-1", Role: "assistant", Content: "steered", CreatedAt: "2026-02-26T00:00:04Z"},
 			}})
-			break
+		case "turn/interrupt":
+			if interruptFail {
+				write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &codex.JSONRPCErrorObj{Code: -32010, Message: "interrupt failed"}})
+				break
+			}
+			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"interrupted": true, "thread_id": "th-real-1"}})
+		default:
+			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &codex.JSONRPCErrorObj{Code: -32601, Message: "method not found"}})
 		}
-		turnID := "tu-run-" + req.ID
-		if strings.Contains(prompt, "steer_instruction:") {
-			turnID = "tu-steer-bootstrap-" + req.ID
-		}
-		if emptyTurnID || shouldApplyToPrompt(prompt, emptyTurnStep) {
-			turnID = ""
-		}
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Turn{ID: turnID, ThreadID: "th-real-1", Role: "assistant", Content: "ok", CreatedAt: "2026-02-26T00:00:03Z"}})
-	case "review/start":
-		turnID := "tu-steer-" + req.ID
-		if emptyTurnID {
-			turnID = ""
-		}
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: codex.Turn{ID: turnID, ThreadID: "th-real-1", Role: "assistant", Content: "steered", CreatedAt: "2026-02-26T00:00:04Z"}})
-	case "turn/interrupt":
-		if interruptFail {
-			write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &codex.JSONRPCErrorObj{Code: -32010, Message: "interrupt failed"}})
-			break
-		}
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"interrupted": true, "thread_id": "th-real-1"}})
-	default:
-		write(codex.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &codex.JSONRPCErrorObj{Code: -32601, Message: "method not found"}})
 	}
-	os.Exit(0)
+}
+
+func extractPromptFromTurnStartParams(params map[string]any) string {
+	if params == nil {
+		return ""
+	}
+	if prompt, _ := params["prompt"].(string); strings.TrimSpace(prompt) != "" {
+		return prompt
+	}
+	items, _ := params["input"].([]any)
+	for _, item := range items {
+		m, _ := item.(map[string]any)
+		if text, _ := m["text"].(string); strings.TrimSpace(text) != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 func executeAX(t *testing.T, args ...string) (string, error) {

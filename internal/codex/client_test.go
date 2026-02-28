@@ -3,7 +3,9 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -122,6 +124,45 @@ func TestStdioClient_RunTurnHandlesLargeJSONPayload(t *testing.T) {
 	}
 }
 
+func TestStdioClient_RunTurnWaitsForCompletionNotification(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	client := NewStdioClient(os.Args[0], "-test.run=TestHelperProcessCodexServer")
+
+	turn, err := client.RunTurn(context.Background(), "th-1", "async-turn")
+	if err != nil {
+		t.Fatalf("RunTurn async-turn: %v", err)
+	}
+	if turn.ID != "tu-async" {
+		t.Fatalf("expected async turn id, got %q", turn.ID)
+	}
+	if turn.Content != "async-delta" {
+		t.Fatalf("expected async-delta content, got %q", turn.Content)
+	}
+}
+
+func TestStdioClient_StreamTurnFromNotifications(t *testing.T) {
+	t.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	client := NewStdioClient(os.Args[0], "-test.run=TestHelperProcessCodexServer")
+
+	events, err := client.StreamTurn(context.Background(), "th-1", "async-stream")
+	if err != nil {
+		t.Fatalf("StreamTurn async-stream: %v", err)
+	}
+	var got []StreamEvent
+	for evt := range events {
+		got = append(got, evt)
+	}
+	if len(got) < 2 {
+		t.Fatalf("expected at least delta+completed events, got %#v", got)
+	}
+	if got[0].Type != StreamEventDelta {
+		t.Fatalf("expected first event delta, got %#v", got[0])
+	}
+	if got[len(got)-1].Type != StreamEventCompleted || !got[len(got)-1].Completed {
+		t.Fatalf("expected final completed event, got %#v", got[len(got)-1])
+	}
+}
+
 func TestSleepWithContext_Cancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -135,61 +176,139 @@ func TestHelperProcessCodexServer(t *testing.T) {
 		return
 	}
 
-	var req JSONRPCRequest
-	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
-		fmt.Fprintf(os.Stdout, `{"jsonrpc":"2.0","id":"0","error":{"code":-32700,"message":"parse error"}}\n`)
-		os.Exit(0)
-	}
+	decoder := json.NewDecoder(os.Stdin)
 
 	write := func(v any) {
 		_ = json.NewEncoder(os.Stdout).Encode(v)
 	}
 
-	switch req.Method {
-	case "thread/start":
-		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Thread{ID: "th-1", Title: "hello", CreatedAt: "2026-02-26T00:00:00Z"}})
-	case "turn/start":
-		params, _ := req.Params.(map[string]any)
-		if stream, _ := params["stream"].(bool); stream {
-			prompt, _ := params["prompt"].(string)
-			if prompt == "stream-no-complete" {
-				events := []StreamEvent{
-					{Type: "delta", ThreadID: "th-1", TurnID: "tu-3", Delta: "partial"},
-				}
-				write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: events})
+	initialized := false
+	for {
+		var req JSONRPCRequest
+		if err := decoder.Decode(&req); err != nil {
+			if errors.Is(err, io.EOF) {
 				os.Exit(0)
 			}
-			events := []StreamEvent{
-				{Type: "delta", ThreadID: "th-1", TurnID: "tu-3", Delta: "Hello"},
-				{Type: "completed", ThreadID: "th-1", TurnID: "tu-3", Completed: true},
+			fmt.Fprintf(os.Stdout, `{"jsonrpc":"2.0","id":"0","error":{"code":-32700,"message":"parse error"}}`+"\n")
+			os.Exit(0)
+		}
+
+		switch req.Method {
+		case rpcMethodInitialize:
+			initialized = true
+			write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"userAgent": "ax-test"}})
+		case rpcMethodInitialized:
+			// notification: no response
+		default:
+			if !initialized {
+				write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &JSONRPCErrorObj{Code: -32600, Message: "Not initialized"}})
+				continue
 			}
-			write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: events})
-			os.Exit(0)
+
+			switch req.Method {
+			case "thread/start":
+				write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+					"thread": Thread{ID: "th-1", Title: "hello", CreatedAt: "2026-02-26T00:00:00Z"},
+				}})
+			case "turn/start":
+				params, _ := req.Params.(map[string]any)
+				prompt := extractPrompt(params)
+				if stream, _ := params["stream"].(bool); stream {
+					if prompt == "stream-no-complete" {
+						events := []StreamEvent{
+							{Type: "delta", ThreadID: "th-1", TurnID: "tu-3", Delta: "partial"},
+						}
+						write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: events})
+						continue
+					}
+					events := []StreamEvent{
+						{Type: "delta", ThreadID: "th-1", TurnID: "tu-3", Delta: "Hello"},
+						{Type: "completed", ThreadID: "th-1", TurnID: "tu-3", Completed: true},
+					}
+					write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: events})
+					continue
+				}
+				if prompt == "force-error" {
+					write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &JSONRPCErrorObj{Code: 500, Message: "boom"}})
+					continue
+				}
+				if prompt == "large-payload" {
+					write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+						"turn": Turn{ID: "tu-large", ThreadID: "th-1", Role: "assistant", Content: strings.Repeat("L", 70000), CreatedAt: "2026-02-26T00:00:05Z"},
+					}})
+					continue
+				}
+				if prompt == "async-turn" || prompt == "async-stream" {
+					write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+						"turn": map[string]any{"id": "tu-async", "status": "inProgress"},
+					}})
+					write(map[string]any{
+						"jsonrpc": "2.0",
+						"method":  "item/agentMessage/delta",
+						"params": map[string]any{
+							"threadId": "th-1",
+							"turnId":   "tu-async",
+							"delta":    "async-delta",
+						},
+					})
+					write(map[string]any{
+						"jsonrpc": "2.0",
+						"method":  "turn/completed",
+						"params": map[string]any{
+							"threadId": "th-1",
+							"turn": map[string]any{
+								"id":     "tu-async",
+								"status": "completed",
+							},
+						},
+					})
+					continue
+				}
+				write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+					"turn": Turn{ID: "tu-1", ThreadID: "th-1", Role: "assistant", Content: "ok:" + prompt, CreatedAt: "2026-02-26T00:00:01Z"},
+				}})
+			case "thread/read":
+				write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+					"thread": Thread{ID: "th-1", Title: "hello", CreatedAt: "2026-02-26T00:00:00Z"},
+				}})
+			case "thread/resume":
+				write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+					"thread": Thread{ID: "th-1", Title: "resumed", CreatedAt: "2026-02-26T00:00:00Z"},
+				}})
+			case "thread/fork":
+				write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+					"thread": Thread{ID: "th-2", Title: "fork", CreatedAt: "2026-02-26T00:00:02Z"},
+				}})
+			case "thread/rollback":
+				write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+					"thread": Thread{ID: "th-1", Title: "rolled back", CreatedAt: "2026-02-26T00:00:03Z"},
+				}})
+			case "review/start":
+				write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+					"turn": Turn{ID: "tu-2", ThreadID: "th-1", Role: "assistant", Content: "steered", CreatedAt: "2026-02-26T00:00:04Z"},
+				}})
+			case "turn/interrupt":
+				write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{}})
+			default:
+				write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &JSONRPCErrorObj{Code: -32601, Message: "method not found"}})
+			}
 		}
-		prompt, _ := params["prompt"].(string)
-		if prompt == "force-error" {
-			write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &JSONRPCErrorObj{Code: 500, Message: "boom"}})
-			os.Exit(0)
-		}
-		if prompt == "large-payload" {
-			write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Turn{ID: "tu-large", ThreadID: "th-1", Role: "assistant", Content: strings.Repeat("L", 70000), CreatedAt: "2026-02-26T00:00:05Z"}})
-			os.Exit(0)
-		}
-		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Turn{ID: "tu-1", ThreadID: "th-1", Role: "assistant", Content: "ok:" + prompt, CreatedAt: "2026-02-26T00:00:01Z"}})
-	case "thread/read":
-		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Thread{ID: "th-1", Title: "hello", CreatedAt: "2026-02-26T00:00:00Z"}})
-	case "thread/resume":
-		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Thread{ID: "th-1", Title: "resumed", CreatedAt: "2026-02-26T00:00:00Z"}})
-	case "thread/fork":
-		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Thread{ID: "th-2", Title: "fork", CreatedAt: "2026-02-26T00:00:02Z"}})
-	case "thread/rollback":
-		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Thread{ID: "th-1", Title: "rolled back", CreatedAt: "2026-02-26T00:00:03Z"}})
-	case "review/start":
-		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: Turn{ID: "tu-2", ThreadID: "th-1", Role: "assistant", Content: "steered", CreatedAt: "2026-02-26T00:00:04Z"}})
-	case "turn/interrupt":
-		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"interrupted": true}})
-	default:
-		write(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &JSONRPCErrorObj{Code: -32601, Message: "method not found"}})
 	}
-	os.Exit(0)
+}
+
+func extractPrompt(params map[string]any) string {
+	if params == nil {
+		return ""
+	}
+	if prompt, _ := params["prompt"].(string); strings.TrimSpace(prompt) != "" {
+		return prompt
+	}
+	items, _ := params["input"].([]any)
+	for _, item := range items {
+		m, _ := item.(map[string]any)
+		if text, _ := m["text"].(string); strings.TrimSpace(text) != "" {
+			return text
+		}
+	}
+	return ""
 }

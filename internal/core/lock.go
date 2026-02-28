@@ -53,6 +53,9 @@ func WithNamedLock(base, name string, timeout time.Duration, fn func() error) er
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
 		return err
 	}
+	hostname, _ := os.Hostname()
+	_ = reapStaleUnlockedLock(lockPath, hostname, time.Now().UTC())
+
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err
@@ -69,7 +72,7 @@ func WithNamedLock(base, name string, timeout time.Duration, fn func() error) er
 			return err
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("E_LOCK_TIMEOUT: state lock wait exceeded %s", timeout)
+			return fmt.Errorf("E_LOCK_TIMEOUT: state lock wait exceeded %s (%s)", timeout, describeLockTimeout(lockPath, hostname, time.Now().UTC()))
 		}
 		time.Sleep(stateLockPollInterval)
 	}
@@ -77,7 +80,6 @@ func WithNamedLock(base, name string, timeout time.Duration, fn func() error) er
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	}()
 
-	hostname, _ := os.Hostname()
 	acquired := time.Now().UTC()
 	meta := lockMetadata{
 		Name:        name,
@@ -156,6 +158,45 @@ func isLockHeld(path string) bool {
 	return errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN)
 }
 
+func isLockMetadataStale(meta lockMetadata, now time.Time, hostname string) bool {
+	if meta.Hostname == "" && meta.PID <= 0 && strings.TrimSpace(meta.HeartbeatAt) == "" {
+		return false
+	}
+	staleByHeartbeat := false
+	if hb, err := time.Parse(time.RFC3339, meta.HeartbeatAt); err == nil {
+		staleByHeartbeat = now.Sub(hb) > lockStaleAfter
+	}
+	staleByDeadPID := meta.Hostname == hostname && meta.PID > 0 && !isProcessAlive(meta.PID)
+	return staleByDeadPID || staleByHeartbeat
+}
+
+func reapStaleUnlockedLock(path, hostname string, now time.Time) bool {
+	if isLockHeld(path) {
+		return false
+	}
+	meta, ok := readLockMetadata(path)
+	if !ok {
+		return false
+	}
+	if !isLockMetadataStale(meta, now, hostname) {
+		return false
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
+
+func describeLockTimeout(path, hostname string, now time.Time) string {
+	held := isLockHeld(path)
+	meta, ok := readLockMetadata(path)
+	if !ok {
+		return fmt.Sprintf("held=%t", held)
+	}
+	stale := isLockMetadataStale(meta, now, hostname)
+	return fmt.Sprintf("pid=%d host=%s heartbeat=%s held=%t stale=%t", meta.PID, meta.Hostname, meta.HeartbeatAt, held, stale)
+}
+
 // InspectLocks returns status summaries for lock files in .ax/locks.
 func InspectLocks(base string) ([]LockInfo, error) {
 	lockDir := filepath.Join(base, stateDirName, "locks")
@@ -188,12 +229,7 @@ func InspectLocks(base string) ([]LockInfo, error) {
 			info.AcquiredAt = meta.AcquiredAt
 			info.HeartbeatAt = meta.HeartbeatAt
 
-			staleByHeartbeat := false
-			if hb, err := time.Parse(time.RFC3339, meta.HeartbeatAt); err == nil {
-				staleByHeartbeat = now.Sub(hb) > lockStaleAfter
-			}
-			staleByDeadPID := meta.Hostname == hostname && meta.PID > 0 && !isProcessAlive(meta.PID)
-			info.Stale = staleByDeadPID || staleByHeartbeat
+			info.Stale = isLockMetadataStale(meta, now, hostname)
 			if held {
 				info.Stale = false
 			}

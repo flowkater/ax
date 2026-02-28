@@ -87,6 +87,9 @@ func TestNewAdapterModes(t *testing.T) {
 	if client.command != "codex" {
 		t.Fatalf("unexpected client command: %s", client.command)
 	}
+	if len(client.args) != 1 || client.args[0] != "app-server" {
+		t.Fatalf("expected default real args [app-server], got %v", client.args)
+	}
 }
 
 func TestNewAdapterRejectsInvalidMode(t *testing.T) {
