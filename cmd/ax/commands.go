@@ -791,17 +791,20 @@ func newTUICmd() *cobra.Command {
 var tuiDangerousActions = []string{"retry", "resume", "interrupt", "rollback", "fork", "steer"}
 
 var tuiKeyBindingHelp = []string{
-	"1-5:switch-screen",
 	"tab/shift+tab:navigate",
-	"r:refresh",
-	"t:retry",
-	"u:resume",
-	"i:interrupt",
-	"b:rollback",
-	"f:fork",
-	"s:steer",
+	"text|/cmd:input",
+	"enter:submit",
+	"up/down:history",
+	"ctrl+r:refresh",
+	"ctrl+t:retry",
+	"ctrl+u:resume",
+	"ctrl+x:interrupt",
+	"ctrl+b:rollback",
+	"ctrl+f:fork",
+	"ctrl+s:steer",
+	"/help:commands",
 	"y/n:confirm",
-	"q:quit",
+	"ctrl+c:quit",
 }
 
 func normalizeTUIAction(action string) (string, error) {

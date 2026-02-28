@@ -18,6 +18,15 @@ var (
 const defaultTUISteerInstruction = "tui steer request: apply safe incremental correction"
 
 func performTUIEngineAction(st *core.State, action string, now time.Time) (threadID string, turnID string, err error) {
+	return performTUIEngineActionWithOptions(st, action, tuiEngineActionOptions{}, now)
+}
+
+type tuiEngineActionOptions struct {
+	SteerInstruction string
+	RollbackTurnID   string
+}
+
+func performTUIEngineActionWithOptions(st *core.State, action string, opts tuiEngineActionOptions, now time.Time) (threadID string, turnID string, err error) {
 	if st == nil {
 		return "", "", fmt.Errorf("state is required")
 	}
@@ -90,7 +99,10 @@ func performTUIEngineAction(st *core.State, action string, now time.Time) (threa
 		if threadID == "" {
 			return "", "", fmt.Errorf("rollback unavailable: no persisted thread_id")
 		}
-		turnID = resolveTUITargetTurnID(st)
+		turnID = strings.TrimSpace(opts.RollbackTurnID)
+		if turnID == "" {
+			turnID = resolveTUITargetTurnID(st)
+		}
 		thread, err := engine.RollbackTurns(callCtx, threadID, turnID)
 		if err != nil {
 			return threadID, turnID, err
@@ -123,7 +135,11 @@ func performTUIEngineAction(st *core.State, action string, now time.Time) (threa
 			return "", "", fmt.Errorf("steer unavailable: no persisted thread_id")
 		}
 		targetTurnID := resolveTUITargetTurnID(st)
-		turn, err := engine.SteerTurn(callCtx, threadID, targetTurnID, defaultTUISteerInstruction)
+		instruction := strings.TrimSpace(opts.SteerInstruction)
+		if instruction == "" {
+			instruction = defaultTUISteerInstruction
+		}
+		turn, err := engine.SteerTurn(callCtx, threadID, targetTurnID, instruction)
 		if err != nil {
 			return threadID, targetTurnID, err
 		}
